@@ -9,6 +9,7 @@ import { toolbus } from './toolbus'
 import { chat } from './chat'
 import { deviceHub } from './device-hub'
 import { agentSettings } from './settings'
+import { desktopPromptBlock } from './desktop-tools'
 import { reactive } from 'vue'
 // 走 URL import —— Vite 会把这个当成静态资源 URL 返回
 import agenticCoreUrl from 'agentic-core/agentic-core.js?url'
@@ -104,7 +105,7 @@ export async function agentAsk(prompt: string): Promise<void> {
       baseUrl: baseUrl || undefined,
       proxyUrl: proxyEnabled && proxyUrl ? proxyUrl : undefined,
       model,
-      system,
+      system: `${system}\n\n${desktopPromptBlock()}`,
       tools: buildTools(),
       history: history.slice(0, -1),
       stream: true,

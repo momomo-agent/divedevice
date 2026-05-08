@@ -1,4 +1,5 @@
 import { appRegistry } from '@/services/app-registry'
+import { registerDesktopTools } from '@/services/desktop-tools'
 import { finderManifest } from './finder/manifest'
 import { terminalManifest } from './terminal/manifest'
 import { editorManifest } from './editor/manifest'
@@ -23,4 +24,7 @@ export function registerBuiltInApps() {
   appRegistry.register(screenshotManifest)
   appRegistry.register(recorderManifest)
   appRegistry.register(logcatManifest)
+
+  // 系统级 agent tools（桃面 / 窗口自省）
+  registerDesktopTools()
 }
