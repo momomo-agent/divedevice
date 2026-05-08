@@ -1,18 +1,27 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { onMounted, onBeforeUnmount, watch } from 'vue'
 import Dock from './Dock.vue'
 import Desktop from './Desktop.vue'
 import ChatPanel, { type ChatPosition } from './ChatPanel.vue'
 import StatusBar from './StatusBar.vue'
+import { usePersistedState } from '@/services/persist'
 
-const chatPos = ref<ChatPosition>('right')
-const previousPos = ref<ChatPosition>('right')
+// 对话窗口位置持久化——left / right / float / hidden
+const { state: chatPos } = usePersistedState<ChatPosition>('shell', 'chatPos', 'right')
+// “上次不是 hidden 的位置”——按 ⌘J 唤起时回到这里
+const { state: previousPos } = usePersistedState<ChatPosition>('shell', 'chatPrevPos', 'right')
+
+// 从 hidden 切回可见时，同步更新 previousPos
+watch(chatPos, (v, old) => {
+  if (old === 'hidden' && v !== 'hidden') previousPos.value = v
+  else if (v !== 'hidden') previousPos.value = v
+})
 
 function onKey(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'j') {
     e.preventDefault()
     if (chatPos.value === 'hidden') {
-      chatPos.value = previousPos.value
+      chatPos.value = previousPos.value === 'hidden' ? 'right' : previousPos.value
     } else {
       previousPos.value = chatPos.value
       chatPos.value = 'hidden'
@@ -47,7 +56,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       v-if="chatPos === 'hidden'"
       class="chat-fab"
       title="唤起对话 (⌘J)"
-      @click="chatPos = previousPos"
+      @click="chatPos = previousPos === 'hidden' ? 'right' : previousPos"
     >✶</button>
     <StatusBar :right-inset="chatPos === 'right' ? 360 : 0" />
   </div>
