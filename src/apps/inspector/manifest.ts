@@ -145,5 +145,449 @@ export const inspectorManifest: AppManifest = {
         return { ok: true }
       },
     },
+
+    // ========== 新增：覆盖 adb 完整能力 ==========
+
+    {
+      name: 'shell.exec',
+      description: '运行任意 shell 命令并返回 stdout/stderr/exitCode。备用逗号——先找专用 tool。',
+      parameters: {
+        type: 'object',
+        properties: { cmd: { type: 'string' } },
+        required: ['cmd'],
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.shell.exec(String(args.cmd))
+      },
+    },
+    {
+      name: 'sys.summary',
+      description: '设备总览：型号/品牌/厂商/SN/SDK/Android 版本/ABI/分辨率/密度/启动时长。',
+      parameters: { type: 'object', properties: {} },
+      async execute(_args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.system.summary()
+      },
+    },
+    {
+      name: 'sys.dumpsys',
+      description: 'dumpsys <service>（+ 可选 args）原文。',
+      parameters: {
+        type: 'object',
+        properties: {
+          service: { type: 'string' },
+          args: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['service'],
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.system.dumpsys(String(args.service), (args.args as string[]) ?? [])
+      },
+    },
+    {
+      name: 'sys.services',
+      description: '已注册的 binder service 列表。',
+      parameters: { type: 'object', properties: {} },
+      async execute(_args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.system.services()
+      },
+    },
+    {
+      name: 'am.start',
+      description: '用 intent 启动 Activity 。extras 接受 { key: stringNumberBoolean } 或 { key: { type, value } }。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string' },
+          data: { type: 'string' },
+          mime: { type: 'string' },
+          component: { type: 'string', description: 'pkg/FullActivity' },
+          pkg: { type: 'string' },
+          categories: { type: 'array', items: { type: 'string' } },
+          flags: { type: 'number' },
+          extras: { type: 'object' },
+          wait: { type: 'boolean' },
+          user: { type: 'number' },
+        },
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        const { wait, user, ...intent } = args as Record<string, unknown>
+        return d.am.start(intent as Parameters<typeof d.am.start>[0], {
+          waitForLaunch: Boolean(wait),
+          user: user as number | undefined,
+        })
+      },
+    },
+    {
+      name: 'am.broadcast',
+      description: '发送 broadcast intent 。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string' },
+          data: { type: 'string' },
+          mime: { type: 'string' },
+          component: { type: 'string' },
+          pkg: { type: 'string' },
+          categories: { type: 'array', items: { type: 'string' } },
+          extras: { type: 'object' },
+        },
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.am.broadcast(args as Parameters<typeof d.am.broadcast>[0])
+      },
+    },
+    {
+      name: 'am.forceStop',
+      description: 'am force-stop，手动杀掉前台/后台包。',
+      parameters: { type: 'object', properties: { pkg: { type: 'string' } }, required: ['pkg'] },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.am.forceStop(String(args.pkg))
+        return { ok: true }
+      },
+    },
+    {
+      name: 'app.list',
+      description: 'pm list packages：传 thirdParty=true 只要三方 app。',
+      parameters: {
+        type: 'object',
+        properties: { thirdParty: { type: 'boolean' }, system: { type: 'boolean' }, user: { type: 'number' } },
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.app.list(args as Parameters<typeof d.app.list>[0])
+      },
+    },
+    {
+      name: 'app.info',
+      description: '某包的 version / installer / system 与否 / 权限概览 等元信息。',
+      parameters: { type: 'object', properties: { pkg: { type: 'string' } }, required: ['pkg'] },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.app.info(String(args.pkg))
+      },
+    },
+    {
+      name: 'app.components',
+      description: '某包的 activities/services/receivers/providers。',
+      parameters: { type: 'object', properties: { pkg: { type: 'string' } }, required: ['pkg'] },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.app.components(String(args.pkg))
+      },
+    },
+    {
+      name: 'app.permissions',
+      description: '某包当前授权状态。',
+      parameters: { type: 'object', properties: { pkg: { type: 'string' } }, required: ['pkg'] },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.app.permissions(String(args.pkg))
+      },
+    },
+    {
+      name: 'app.launch',
+      description: '启动某包的主 Activity。',
+      parameters: { type: 'object', properties: { pkg: { type: 'string' } }, required: ['pkg'] },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.app.launch(String(args.pkg))
+        return { ok: true }
+      },
+    },
+    {
+      name: 'input.tap',
+      description: 'adb shell input tap 。',
+      parameters: {
+        type: 'object',
+        properties: { x: { type: 'number' }, y: { type: 'number' } },
+        required: ['x', 'y'],
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.input.tap(Number(args.x), Number(args.y))
+        return { ok: true }
+      },
+    },
+    {
+      name: 'input.swipe',
+      description: 'adb shell input swipe 。',
+      parameters: {
+        type: 'object',
+        properties: { x1: { type: 'number' }, y1: { type: 'number' }, x2: { type: 'number' }, y2: { type: 'number' }, durationMs: { type: 'number' } },
+        required: ['x1', 'y1', 'x2', 'y2'],
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.input.swipe(
+          Number(args.x1), Number(args.y1),
+          Number(args.x2), Number(args.y2),
+          args.durationMs ? Number(args.durationMs) : undefined,
+        )
+        return { ok: true }
+      },
+    },
+    {
+      name: 'input.key',
+      description: 'input keyevent。code 可以是数字 keycode 或 "KEYCODE_HOME" 这种。',
+      parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.input.key(String(args.code))
+        return { ok: true }
+      },
+    },
+    {
+      name: 'input.text',
+      description: 'adb shell input text 。',
+      parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.input.text(String(args.text))
+        return { ok: true }
+      },
+    },
+    {
+      name: 'settings.get',
+      description: 'settings get <system|secure|global> <key>。',
+      parameters: {
+        type: 'object',
+        properties: {
+          ns: { type: 'string', enum: ['system', 'secure', 'global'] },
+          key: { type: 'string' },
+        },
+        required: ['ns', 'key'],
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.settings.get(args.ns as 'system' | 'secure' | 'global', String(args.key))
+      },
+    },
+    {
+      name: 'settings.put',
+      description: 'settings put <system|secure|global> <key> <value>。',
+      parameters: {
+        type: 'object',
+        properties: {
+          ns: { type: 'string', enum: ['system', 'secure', 'global'] },
+          key: { type: 'string' }, value: { type: 'string' },
+        },
+        required: ['ns', 'key', 'value'],
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.settings.put(args.ns as 'system' | 'secure' | 'global', String(args.key), String(args.value))
+        return { ok: true }
+      },
+    },
+    {
+      name: 'svc.wifi',
+      description: '开关 WiFi。',
+      parameters: { type: 'object', properties: { on: { type: 'boolean' } }, required: ['on'] },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.svc.wifi(Boolean(args.on))
+        return { ok: true }
+      },
+    },
+    {
+      name: 'svc.data',
+      description: '开关移动网络流量。',
+      parameters: { type: 'object', properties: { on: { type: 'boolean' } }, required: ['on'] },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.svc.data(Boolean(args.on))
+        return { ok: true }
+      },
+    },
+    {
+      name: 'svc.bluetooth',
+      description: '开关蓝牙。',
+      parameters: { type: 'object', properties: { on: { type: 'boolean' } }, required: ['on'] },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.svc.bluetooth(Boolean(args.on))
+        return { ok: true }
+      },
+    },
+    {
+      name: 'wm.size',
+      description: '读当前屏幕物理/覆盖分辨率。',
+      parameters: { type: 'object', properties: {} },
+      async execute(_args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.wm.size()
+      },
+    },
+    {
+      name: 'wm.density',
+      description: '读当前屏幕密度。',
+      parameters: { type: 'object', properties: {} },
+      async execute(_args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.wm.density()
+      },
+    },
+    {
+      name: 'power.wake',
+      description: '唪醒屏幕。',
+      parameters: { type: 'object', properties: {} },
+      async execute(_args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.power.wake()
+        return { ok: true }
+      },
+    },
+    {
+      name: 'power.lock',
+      description: '锁屏。',
+      parameters: { type: 'object', properties: {} },
+      async execute(_args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.power.lock()
+        return { ok: true }
+      },
+    },
+    {
+      name: 'power.isInteractive',
+      description: '屏幕是否交流中（亮）。',
+      parameters: { type: 'object', properties: {} },
+      async execute(_args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.power.isInteractive()
+      },
+    },
+    {
+      name: 'log.tail',
+      description: 'logcat -d（一次性 dump）取最后 N 行，支持 pid / filter / buffer 过滤。',
+      parameters: {
+        type: 'object',
+        properties: {
+          lines: { type: 'number' },
+          pid: { type: 'number' },
+          buffer: { type: 'string', enum: ['main', 'system', 'crash', 'events', 'radio', 'all'] },
+          filters: { type: 'array', items: { type: 'string' } },
+          format: { type: 'string' },
+        },
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.log.tail(args as Parameters<typeof d.log.tail>[0])
+      },
+    },
+    {
+      name: 'net.interfaces',
+      description: '网络接口列表（ip/mac/mtu/up）。',
+      parameters: { type: 'object', properties: {} },
+      async execute(_args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.net.interfaces()
+      },
+    },
+    {
+      name: 'net.ping',
+      description: '从设备 ping 某个 host。',
+      parameters: {
+        type: 'object',
+        properties: { host: { type: 'string' }, count: { type: 'number' } },
+        required: ['host'],
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.net.ping(String(args.host), args.count ? Number(args.count) : undefined)
+      },
+    },
+    {
+      name: 'media.volume',
+      description: '音量控制：up / down / mute 或指定 stream 和值。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['up', 'down', 'mute', 'play', 'pause', 'next', 'prev', 'set'] },
+          stream: { type: 'string', enum: ['ring', 'music', 'alarm', 'voice_call', 'notification', 'system'] },
+          value: { type: 'number' },
+        },
+        required: ['action'],
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        const a = String(args.action)
+        switch (a) {
+          case 'up': await d.media.volumeUp(); break
+          case 'down': await d.media.volumeDown(); break
+          case 'mute': await d.media.mute(); break
+          case 'play': await d.media.play(); break
+          case 'pause': await d.media.pause(); break
+          case 'next': await d.media.next(); break
+          case 'prev': await d.media.prev(); break
+          case 'set': {
+            if (!args.stream || args.value === undefined) throw new Error('set 需要 stream + value')
+            await d.media.setMediaVolume(
+              args.stream as 'ring' | 'music' | 'alarm' | 'voice_call' | 'notification' | 'system',
+              Number(args.value),
+            )
+            break
+          }
+          default: throw new Error(`unknown action: ${a}`)
+        }
+        return { ok: true }
+      },
+    },
+    {
+      name: 'pm.features',
+      description: 'pm list features。',
+      parameters: { type: 'object', properties: {} },
+      async execute(_args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.pm.features()
+      },
+    },
+    {
+      name: 'pm.users',
+      description: 'pm list users。',
+      parameters: { type: 'object', properties: {} },
+      async execute(_args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.pm.users()
+      },
+    },
   ],
 }

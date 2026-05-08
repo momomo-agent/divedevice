@@ -61,13 +61,24 @@ export interface AppManifest {
 
 // ============ Tools（Agent 层） ============
 
+export interface ToolParamSchema {
+  type: string
+  description?: string
+  enum?: string[]
+  /** type === 'array' 时的元素 schema */
+  items?: ToolParamSchema
+  /** type === 'object' 时的字段 schema（可选） */
+  properties?: Record<string, ToolParamSchema>
+  required?: string[]
+}
+
 export interface ToolDefinition {
   name: string                // 命名空间：'fs.ls' / 'editor.open'
   description: string
   // JSON Schema 子集，足够描述参数即可
   parameters: {
     type: 'object'
-    properties: Record<string, { type: string; description?: string; enum?: string[] }>
+    properties: Record<string, ToolParamSchema>
     required?: string[]
   }
   // 由运行时填入 context 后执行
