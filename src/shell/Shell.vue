@@ -3,6 +3,7 @@ import { ref, onMounted, onBeforeUnmount } from 'vue'
 import Dock from './Dock.vue'
 import Desktop from './Desktop.vue'
 import ChatPanel, { type ChatPosition } from './ChatPanel.vue'
+import StatusBar from './StatusBar.vue'
 
 const chatPos = ref<ChatPosition>('right')
 const previousPos = ref<ChatPosition>('right')
@@ -48,6 +49,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       title="唤起对话 (⌘J)"
       @click="chatPos = previousPos"
     >✶</button>
+    <StatusBar :right-inset="chatPos === 'right' ? 360 : 0" />
   </div>
 </template>
 

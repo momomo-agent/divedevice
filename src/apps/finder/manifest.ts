@@ -9,11 +9,11 @@ export const finderManifest: AppManifest = {
   component: Window,
   requiresDevice: true,
   windowDefaults: {
-    width: 620,
-    height: 440,
+    width: 880,
+    height: 560,
     resizable: true,
-    minWidth: 380,
-    minHeight: 240,
+    minWidth: 560,
+    minHeight: 340,
   },
   tools: [
     {

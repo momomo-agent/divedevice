@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { chat, agentAsk, agentState, agentSettings, deviceHub } from '@/services'
+import { chat, agentAsk, agentState, agentSettings } from '@/services'
 
 export type ChatPosition = 'left' | 'right' | 'float' | 'hidden'
 
@@ -52,10 +52,7 @@ onBeforeUnmount(() => { stopWatching?.() })
   >
     <header>
       <div class="title">对话</div>
-      <div class="device-hint" v-if="deviceHub.currentId.value">
-        @ {{ deviceHub.devices.value.find(d => d.id === deviceHub.currentId.value)?.name }}
-      </div>
-      <div class="device-hint" v-else>未连接设备</div>
+      <div class="grow" />
       <button class="gear" title="设置" @click="showSettings = !showSettings">⚙</button>
       <div class="position-switch">
         <button :class="{ active: position === 'left' }" @click="emit('update:position', 'left')" title="左侧">⟨</button>
@@ -173,6 +170,7 @@ header .title {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.grow { flex: 1; }
 .gear {
   width: 22px;
   height: 22px;
