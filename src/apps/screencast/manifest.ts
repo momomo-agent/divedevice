@@ -68,7 +68,7 @@ export const screencastManifest: AppManifest = {
     },
     {
       name: 'screen.capture',
-      description: '截取 Android 设备当前屏幕，返回 PNG 的 base64 字符串。',
+      description: 'Take a screenshot of the device. Returns metadata only; the actual PNG is NOT readable by the model and does NOT enter context. The user sees it in the UI automatically. Call this AT MOST ONCE per request unless the user asks again. If you need to show the screen to the user, prefer desktop.open with appId=screenshot or screencast.',
       parameters: { type: 'object', properties: {} },
       async execute(_args, ctx) {
         const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
@@ -76,7 +76,15 @@ export const screencastManifest: AppManifest = {
         const png = await d.screen.capture()
         let bin = ''
         for (let i = 0; i < png.length; i++) bin += String.fromCharCode(png[i])
-        return { pngBase64: btoa(bin), size: png.length }
+        const b64 = btoa(bin)
+        // 把截得的图直接推入 chat，用户立即能看到缩略图
+        try {
+          const mod = await import('@/services/chat')
+          mod.chat.push('assistant', '[screen capture]', {
+            images: [{ preview: `data:image/png;base64,${b64}`, media_type: 'image/png' }],
+          })
+        } catch {}
+        return { ok: true, size: png.length, note: 'captured; image shown to user via chat UI; do not call again' }
       },
     },
   ],

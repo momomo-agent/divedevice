@@ -83,6 +83,33 @@ function buildHistory(): Array<{ role: string; content: unknown }> {
   return out
 }
 
+// 知名的二进制/超长输出字段，对模型来说没意义（在下一轮只会净浪费 token，导致幻觉 / 死循环）
+const LARGE_BINARY_KEYS = new Set([
+  'pngBase64', 'jpegBase64', 'jpgBase64', 'imageBase64', 'dataUrl',
+  'base64', 'png', 'jpg', 'jpeg',
+  'bytes', 'buffer', 'raw',
+])
+
+function sanitizeToolResult(toolName: string, r: unknown): unknown {
+  if (r == null || typeof r !== 'object' || Array.isArray(r)) return r
+  const obj = r as Record<string, unknown>
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'string' && LARGE_BINARY_KEYS.has(k) && v.length > 1024) {
+      out[k] = `<${k} ${v.length} bytes elided, use a UI-facing tool to view>`
+      // 模型拿不到图，求它不要重复调；打个显示标记
+      out._hint = `图片已截图到用户界面（${toolName}）。请不要重复调用。要看结果、请告诉用户“截图已到 Screenshot app”等。`
+    } else if (typeof v === 'string' && v.length > 4096) {
+      out[k] = v.slice(0, 4096) + `… <truncated, ${v.length - 4096} more chars>`
+    } else if (v && typeof v === 'object') {
+      out[k] = sanitizeToolResult(toolName, v)
+    } else {
+      out[k] = v
+    }
+  }
+  return out
+}
+
 function buildTools() {
   const deviceId = deviceHub.currentId.value ?? undefined
   return toolbus.list().map((def) => ({
@@ -92,10 +119,11 @@ function buildTools() {
     execute: async (input: Record<string, unknown>) => {
       try {
         const r = await def.execute(input, { deviceId })
-        console.debug('[tool-wrapper]', def.name, 'returned:', r)
-        // undefined 和 void return 对下游反序列化不友好，正规化为一个结构体
+        console.debug('[tool-wrapper]', def.name, 'raw:', r)
         if (r === undefined) return { ok: true }
-        return r
+        const safe = sanitizeToolResult(def.name, r)
+        console.debug('[tool-wrapper]', def.name, 'sanitized:', safe)
+        return safe
       } catch (err) {
         console.debug('[tool-wrapper]', def.name, 'error:', err)
         return { error: (err as Error).message }
