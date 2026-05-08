@@ -111,9 +111,17 @@ export async function agentAsk(prompt: string): Promise<void> {
           })
           break
         case 'tool_result': {
-          const text = typeof event.result === 'string'
-            ? event.result
-            : JSON.stringify(event.result)
+          const payload = event.error !== undefined && event.result === undefined
+            ? { error: event.error }
+            : event.result
+          let text: string
+          if (payload === undefined) text = 'undefined'
+          else if (payload === null) text = 'null'
+          else if (typeof payload === 'string') text = payload
+          else {
+            try { text = JSON.stringify(payload) } catch { text = String(payload) }
+            if (text === undefined) text = String(payload)
+          }
           chat.push('tool', `← ${text.length > 400 ? text.slice(0, 400) + '…' : text}`, {
             result: event.result,
             error: event.error,
