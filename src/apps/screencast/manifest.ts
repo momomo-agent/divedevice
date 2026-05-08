@@ -68,7 +68,7 @@ export const screencastManifest: AppManifest = {
     },
     {
       name: 'screen.capture',
-      description: 'Take a screenshot of the device. Returns metadata only; the actual PNG is NOT readable by the model and does NOT enter context. The user sees it in the UI automatically. Call this AT MOST ONCE per request unless the user asks again. If you need to show the screen to the user, prefer desktop.open with appId=screenshot or screencast.',
+      description: 'Take a screenshot of the device. Returns a vision attachment that YOU (the model) can see in the next turn, and the user also sees a thumbnail in chat. Use this to verify UI state after actions (taps, swipes, app launches). Do NOT call it repeatedly without reason — one capture per verification step is usually enough.',
       parameters: { type: 'object', properties: {} },
       async execute(_args, ctx) {
         const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
@@ -84,7 +84,13 @@ export const screencastManifest: AppManifest = {
             images: [{ preview: `data:image/png;base64,${b64}`, media_type: 'image/png' }],
           })
         } catch {}
-        return { ok: true, size: png.length, note: 'captured; image shown to user via chat UI; do not call again' }
+        // _images 字段会被 agent wrapper 透传给模型（走 Anthropic tool_result multimodal）
+        return {
+          ok: true,
+          size: png.length,
+          note: 'Screenshot attached below. Look at it to verify the UI state.',
+          _images: [{ media_type: 'image/png', data: b64 }],
+        }
       },
     },
   ],

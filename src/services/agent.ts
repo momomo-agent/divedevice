@@ -57,11 +57,25 @@ function stringifyErr(v: unknown): string {
   return String(v)
 }
 
-function buildHistory(): Array<{ role: string; content: unknown }> {
+function buildHistory(): Array<{ role: string; content: unknown; _images?: unknown[] }> {
   // 带上 tool 轮次信息，避免模型次轮推理時完全看不到工具调用历史而幻觉。
   // 约定：tool.meta.kind 为 'use' 或 'result'，配合 id/name/input/output 还原 Anthropic/OpenAI 通用的工具消息形状。
-  const out: Array<{ role: string; content: unknown }> = []
-  for (const m of chat.messages) {
+  // 先一遍：找到最后一条带 _images 的 tool result 索引，只保留它的图，避免 token 爆炸
+  let lastImageToolIdx = -1
+  for (let i = chat.messages.length - 1; i >= 0; i--) {
+    const mm = chat.messages[i]
+    if (mm.role === 'tool' && mm.meta && mm.meta.kind === 'result') {
+      const out = (mm.meta as any).output
+      if (out && typeof out === 'object' && Array.isArray(out._images) && out._images.length) {
+        lastImageToolIdx = i
+        break
+      }
+    }
+  }
+
+  const out: Array<{ role: string; content: unknown; _images?: unknown[] }> = []
+  for (let i = 0; i < chat.messages.length; i++) {
+    const m = chat.messages[i]
     if (m.role === 'user' || m.role === 'assistant') {
       if (!m.content) continue // 空文本就丢，避免影响 history
       out.push({ role: m.role, content: m.content })
@@ -73,10 +87,30 @@ function buildHistory(): Array<{ role: string; content: unknown }> {
           content: [{ type: 'tool_use', id: m.meta.id, name: m.meta.name, input: m.meta.input ?? {} }],
         } as never)
       } else if (kind === 'result') {
-        out.push({
+        const rawOutput = m.meta.output
+        let images: unknown[] | undefined
+        let textOutput: unknown = rawOutput
+        if (rawOutput && typeof rawOutput === 'object' && !Array.isArray(rawOutput)) {
+          const rec = rawOutput as Record<string, unknown>
+          if (Array.isArray(rec._images) && rec._images.length) {
+            // 只最后一条 tool result 带图下轮，之前的图放弃（暂按约定只有截图，看最新一张就够）
+            if (i === lastImageToolIdx) {
+              images = rec._images as unknown[]
+              const { _images: _omit, ...rest } = rec
+              textOutput = rest
+            } else {
+              const { _images: _omit, ...rest } = rec
+              textOutput = { ...rest, _imagesOmitted: (rec._images as unknown[]).length }
+            }
+          }
+        }
+        const textPart = typeof textOutput === 'string' ? textOutput : JSON.stringify(textOutput ?? null)
+        const entry: { role: string; content: unknown; _images?: unknown[] } = {
           role: 'user',
-          content: [{ type: 'tool_result', tool_use_id: m.meta.id, content: typeof m.meta.output === 'string' ? m.meta.output : JSON.stringify(m.meta.output ?? null) }],
-        } as never)
+          content: [{ type: 'tool_result', tool_use_id: m.meta.id, content: textPart }],
+        }
+        if (images && images.length) entry._images = images
+        out.push(entry as never)
       }
     }
   }
@@ -90,11 +124,18 @@ const LARGE_BINARY_KEYS = new Set([
   'bytes', 'buffer', 'raw',
 ])
 
+// 白名单：这些键是 agent-core/anthropic tool_result 多模态约定，不要当 binary 砍掉
+const PASSTHROUGH_KEYS = new Set(['_images'])
+
 function sanitizeToolResult(toolName: string, r: unknown): unknown {
   if (r == null || typeof r !== 'object' || Array.isArray(r)) return r
   const obj = r as Record<string, unknown>
   const out: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(obj)) {
+    if (PASSTHROUGH_KEYS.has(k)) {
+      out[k] = v
+      continue
+    }
     if (typeof v === 'string' && LARGE_BINARY_KEYS.has(k) && v.length > 1024) {
       out[k] = `<${k} ${v.length} bytes elided, use a UI-facing tool to view>`
       // 模型拿不到图，求它不要重复调；打个显示标记
