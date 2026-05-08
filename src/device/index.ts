@@ -207,6 +207,8 @@ export interface DeviceAPI {
     processes(): Promise<ProcessInfo[]>
     /** SurfaceFlinger layers */
     layers(): Promise<LayerInfo>
+    /** 当前包/任意包的 layer 分组视图 */
+    layersForPackage(pkg?: string): Promise<{ pkg: string; matched: number; visible: number; layers: LayerInfo['layers'] }>
     /** gfxinfo 渲染统计 */
     gfxinfo(pkg?: string): Promise<string>
     /** meminfo 全局 */
@@ -627,20 +629,95 @@ class AdbDeviceAPI implements DeviceAPI {
     },
 
     layers: async (): Promise<LayerInfo> => {
-      const { stdout } = await this.shell.exec('dumpsys SurfaceFlinger --list')
-      const names = stdout.split('\n').map((l) => l.trim()).filter(Boolean)
-      // 默认 --list 不含 visibility，单购额外拉 dumpsys SurfaceFlinger 解析 visible
-      const { stdout: full } = await this.shell.exec('dumpsys SurfaceFlinger')
+      // SurfaceFlinger 的 layer 树新版 (Android 14+ trunk_stable) 里一大堆是 RequestedLayerState
+      // 无 buffer 的内部 container，真正 "用户看得到" 的是 WindowManager 维护的 window。
+      // 所以：total 还是用 SurfaceFlinger（全部 layer 节点），visible 通过 `dumpsys window windows` 里
+      // isOnScreen / mHasSurface / canBeImeTarget 等维度夹计。
+      const [list, full, windows] = await Promise.all([
+        this.shell.exec('dumpsys SurfaceFlinger --list').catch(() => ({ stdout: '' })),
+        this.shell.exec('dumpsys SurfaceFlinger').catch(() => ({ stdout: '' })),
+        this.shell.exec('dumpsys window windows').catch(() => ({ stdout: '' })),
+      ])
+
+      const names = list.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
+
+      // --- 1) 新版 trunk_stable：在完整 dumpsys 里搜 "isVisible=true" / "flags=0 ... visible" 等 ---
+      // 新版的 “RequestedLayerState{<hash> <name>#<id>}” 形式，对应的输出里会有
+      //    name=StatusBar ... isVisible=true
+      // 或
+      //    Layer { … name="X" … visible=true … }
+      // 旧版（A13-）：+ BufferLayer 0x… (NAME)
       const visibleNames = new Set<string>()
-      // heuristic：section header 开头的 "+ XxxLayer (name)" 通常是活跃 layer
-      for (const line of full.split('\n')) {
+
+      // 旧版 heuristic
+      for (const line of full.stdout.split('\n')) {
         const m = line.match(/^\s*\+\s*(?:BufferLayer|ColorLayer|ContainerLayer|EffectLayer|Layer)\s+\S+\s+\(([^)]+)\)/)
         if (m) visibleNames.add(m[1])
       }
+
+      // --- 2) WindowManager 视角：真正 onscreen 的 window ---
+      // 一段样本：
+      //   Window #5 Window{abc 0 com.baidu.searchbox/com.baidu.….MainActivity}:
+      //     mDisplayId=0 ...
+      //     mHasSurface=true mShownAlpha=1.0 alpha=1.0 transformation=Identity
+      //     isOnScreen=true isVisible=true
+      const winRegex = /Window #\d+ Window\{[^}]*\s+([^\s}]+)\}:([\s\S]*?)(?=\nWindow #|\n\s*mGlobalConfiguration|\n  mLastWakeLockHoldingWindow|\Z)/g
+      let match: RegExpExecArray | null
+      const winVisible = new Set<string>()
+      while ((match = winRegex.exec(windows.stdout)) !== null) {
+        const title = match[1]
+        const body = match[2]
+        const hasSurface = /mHasSurface=true/.test(body)
+        const onScreen = /isOnScreen=true/.test(body)
+        const isVis = /isVisible=true/.test(body)
+        if ((hasSurface && onScreen) || isVis) {
+          winVisible.add(title)
+        }
+      }
+
+      // --- 3) 新版 SurfaceFlinger 输出里，name= 或 (name) 标记为 visible ---
+      //   例："Layer name=StatusBar ... isVisible=true"
+      //   在一段块中找 isVisible=true
+      const sfBlocks = full.stdout.split(/^Layer\s+/m)
+      for (const b of sfBlocks) {
+        if (!/isVisible=true/.test(b)) continue
+        const nm = b.match(/name="([^"]+)"/)?.[1] ?? b.match(/name=(\S+)/)?.[1]
+        if (nm) visibleNames.add(nm)
+      }
+
+      // --- 融合认定：visibleNames 或 WindowManager 视角匹配 ---
+      const layersOut = names.map((rawName) => {
+        // 从 "RequestedLayerState{f9df1d7 DynamicIslandWindow#131 parentId=130}" 中抽取人可读名字
+        const parsed = parseLayerName(rawName)
+        const visible = visibleNames.has(rawName)
+          || visibleNames.has(parsed)
+          || winVisible.has(parsed)
+          // WindowManager 里存的往往是 "pkg/Activity"，模糊包含匹配
+          || [...winVisible].some((w) => parsed.includes(w) || w.includes(parsed))
+        return { name: rawName, visible }
+      })
+
       return {
         total: names.length,
-        visible: visibleNames.size,
-        layers: names.map((name) => ({ name, visible: visibleNames.has(name) })),
+        visible: layersOut.filter((l) => l.visible).length,
+        layers: layersOut,
+      }
+    },
+
+    layersForPackage: async (pkg?: string) => {
+      const target = pkg || (await this.system.topActivity().catch(() => null))?.packageName
+      if (!target) return { pkg: '', matched: 0, visible: 0, layers: [] }
+      const all = await this.system.layers()
+      // pkg 在 layer name 里出现的两种形式：
+      //   1) 整串 "com.x.y" 出现（包名/类名）
+      //   2) 最后一段 "y" （Activity 短名 如 Settings$SubSettings）
+      const last = target.split('.').pop() ?? target
+      const filtered = all.layers.filter((l) => l.name.includes(target) || l.name.includes(last))
+      return {
+        pkg: target,
+        matched: filtered.length,
+        visible: filtered.filter((l) => l.visible).length,
+        layers: filtered,
       }
     },
 
@@ -723,6 +800,15 @@ class AdbDeviceAPI implements DeviceAPI {
     const cmd = filter ? `logcat ${filter}` : 'logcat'
     return this.shell.spawn(cmd)
   }
+}
+
+function parseLayerName(raw: string): string {
+  // RequestedLayerState{hash NAME#id parentId=XX}  → NAME
+  // 或 RequestedLayerState{hash NAME#id}  → NAME
+  const m = raw.match(/RequestedLayerState\{[^\s]+\s+([^#]+?)(?:#\d+)?(?:\s|\})/)
+  if (m) return m[1]
+  // 旧版：直接就是名字
+  return raw
 }
 
 function shellQuote(s: string): string {

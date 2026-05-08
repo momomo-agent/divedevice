@@ -42,12 +42,25 @@ export const inspectorManifest: AppManifest = {
     },
     {
       name: 'sys.layers',
-      description: 'SurfaceFlinger layer 数量 / 可见数 / 名称列表（调试 UI 分层用）。',
+      description: 'SurfaceFlinger 全局 layer 概览（总数/可见数/名称列表）。大多数场景应优先用 sys.appLayers 看某个 app 的 layer。',
       parameters: { type: 'object', properties: {} },
       async execute(_args, ctx) {
         const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
         if (!d) throw new Error('未绑定设备')
         return d.system.layers()
+      },
+    },
+    {
+      name: 'sys.appLayers',
+      description: '某个 app（默认前台）在 SurfaceFlinger 中的 layer：包含所有属于该 pkg 的 layer 与其可见性。常用于 “当前应用有多少个 layer” 这种问题。',
+      parameters: {
+        type: 'object',
+        properties: { pkg: { type: 'string', description: '目标包名；留空自动取前台包' } },
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        return d.system.layersForPackage(args.pkg ? String(args.pkg) : undefined)
       },
     },
     {
