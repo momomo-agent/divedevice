@@ -6,6 +6,7 @@
  */
 import { ref, watch, computed, onBeforeUnmount } from 'vue'
 import { useDevice, useWindow, useEventbus } from '@/composables'
+import { windowManager, lookupFileAssoc, isImageFile } from '@/services'
 import type { FileEntry } from '@/device'
 
 const { window: win } = useWindow()
@@ -103,18 +104,34 @@ const crumbs = computed(() => {
 function onEnter(entry: FileEntry) {
   if (entry.isDir) {
     path.value = entry.path
-  } else if (isImage(entry.name)) {
+    return
+  }
+  if (isImageFile(entry.name)) {
     openPreview(entry)
-  } else {
+    return
+  }
+  const assoc = lookupFileAssoc(entry.path)
+  // 已有目标 app 的窗口 → eventbus 广播（交给窗口自己新建 tab）
+  const existing = windowManager.findByApp?.(assoc.appId, win.value.deviceId)
+  if (existing) {
+    windowManager.focus(existing.id)
     eventbus.emit('finder.openFile', {
       deviceId: win.value.deviceId!,
       path: entry.path,
     })
+    return
   }
+  // 新开一个
+  windowManager.open({
+    appId: assoc.appId,
+    deviceId: win.value.deviceId,
+    title: assoc.title?.(entry.name) ?? entry.name,
+    props: { [assoc.pathProp]: entry.path },
+  })
 }
 
 function isImage(name: string) {
-  return /\.(jpg|jpeg|png|webp|gif|bmp|heic)$/i.test(name)
+  return isImageFile(name)
 }
 
 // ---- Quick image preview (list/icons 双击图片时用) ----

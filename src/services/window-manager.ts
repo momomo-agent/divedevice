@@ -117,4 +117,13 @@ export const windowManager = {
     if (!w) return
     w.deviceId = deviceId
   },
+
+  /** 查找符合 appId + deviceId 的已有窗口（最新聚焦的优先）。*/
+  findByApp(appId: string, deviceId?: string | null): WindowInstance | undefined {
+    const matches = state.windows.filter((w) => w.appId === appId
+      && (deviceId === undefined || w.deviceId === deviceId))
+    if (!matches.length) return undefined
+    // 返回 zIndex 最高（最近聚焦/当前在上）
+    return matches.reduce((a, b) => a.zIndex >= b.zIndex ? a : b)
+  },
 }
