@@ -2,8 +2,41 @@
 .panel { height: 100%; overflow: auto; padding: 14px 18px; font-size: 12px; }
 .panel h3 { font-size: 12.5px; font-weight: 600; color: var(--fg-2); margin: 0 0 10px; letter-spacing: 0.3px; }
 .panel h3:not(:first-child) { margin-top: 18px; }
+.panel h3.hdr { display: flex; align-items: center; gap: 8px; }
+.panel h3.hdr .count { color: var(--fg-3); font-weight: 400; font-size: 10.5px; }
 .panel .hint { color: var(--fg-3); padding: 8px 0; font-size: 11.5px; }
 .panel .err { color: #f87171; }
+
+/* 令牌卡 */
+.panel .stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.panel .card {
+  background: var(--surface-2);
+  border: 1px solid rgba(255,255,255,0.04);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+/* 状态胶囊 */
+.panel .pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+}
+.panel .pill.good { background: rgba(126,230,166,0.18); color: #7ee6a6; }
+.panel .pill.warn { background: rgba(245,192,74,0.2); color: #f5c04a; }
+.panel .pill.danger { background: rgba(248,113,113,0.18); color: #f87171; }
+.panel .pill.info { background: rgba(99,163,255,0.2); color: #9ecbff; }
+.panel .pill.neutral { background: rgba(255,255,255,0.08); color: var(--fg-2); }
 
 /* KV 网格 */
 .panel .kv {
@@ -33,7 +66,7 @@
   font-family: ui-monospace, 'SF Mono', monospace;
   font-size: 11px;
 }
-.panel table th { color: var(--fg-3); font-weight: 500; background: var(--surface-2); position: sticky; top: 0; }
+.panel table th { color: var(--fg-3); font-weight: 500; background: var(--surface-2); position: sticky; top: 0; z-index: 1; cursor: default; }
 .panel table tr:hover td { background: rgba(255,255,255,0.03); }
 .panel table tr.active td { background: rgba(99,163,255,0.18); }
 
@@ -94,3 +127,18 @@
 }
 .panel .btn:hover { background: var(--surface-4); }
 .panel .btn:disabled { opacity: 0.4; }
+.panel .btn.active { background: rgba(99,163,255,0.3); color: #9ecbff; border-color: rgba(99,163,255,0.4); }
+
+/* 数字、单位、辅助信息 */
+.panel .num { font-variant-numeric: tabular-nums; font-weight: 500; }
+.panel .num.big { font-size: 26px; line-height: 1.05; color: var(--fg-1); }
+.panel .num.med { font-size: 16px; }
+.panel .unit { color: var(--fg-3); font-size: 10.5px; margin-left: 2px; }
+
+/* 分割线 */
+.panel .divider { height: 1px; background: rgba(255,255,255,0.05); margin: 14px 0; }
+
+/* inline 信息条 */
+.panel .inline-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 11.5px; }
+.panel .inline-row .grow { flex: 1; }
+
