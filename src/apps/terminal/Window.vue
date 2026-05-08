@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useDevice, useWindow, useAppController } from '@/composables'
 import Session from './Session.vue'
 import {
@@ -136,6 +136,22 @@ function triggerSearch(dir: 'next' | 'prev') {
 function clearActive() { activeSession.value?.clear() }
 function sigintActive() { activeSession.value?.sigint() }
 
+// ⌘K / Ctrl-K 清当前 tab。仅在 terminal window 聚焦时绑定（通过 DOM 包含关系判断）。
+const rootRef = ref<HTMLDivElement | null>(null)
+function onKeyDown(e: KeyboardEvent) {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    const host = rootRef.value
+    const target = e.target as Node | null
+    if (!host) return
+    if (target && host.contains(target)) {
+      e.preventDefault()
+      clearActive()
+    }
+  }
+}
+onMounted(() => window.addEventListener('keydown', onKeyDown, true))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeyDown, true))
+
 // ========== App Controller ==========
 useAppController({
   getState: () => ({
@@ -199,7 +215,7 @@ watch(() => win.value.deviceId, () => { /* session 自己响应 props.device */ 
 </script>
 
 <template>
-  <div class="term-root">
+  <div class="term-root" ref="rootRef">
     <!-- ===== Sidebar ===== -->
     <aside v-if="sidebarOpen" class="sidebar" :style="{ width: sidebarWidth + 'px' }">
       <div class="side-head">
@@ -282,7 +298,7 @@ watch(() => win.value.deviceId, () => { /* session 自己响应 props.device */ 
         </div>
         <div class="spacer" />
         <button class="icon" @click="sigintActive" title="Ctrl-C">⟲</button>
-        <button class="icon" @click="clearActive" title="清屏">🗑</button>
+        <button class="icon" @click="clearActive" title="清屏 (⌘K)">🗑</button>
         <button
           class="icon"
           :class="{ active: searchOpen }"

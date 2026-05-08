@@ -1,55 +1,62 @@
 /**
- * agentic-store Vue 适配层
- * - 把 UMD 的 AgenticStore.createStore 包装成 ES 模块
- * - 提供 `usePersistedState()` 让 Vue 组件一行代码绑定一个持久化 ref
+ * 持久化 helper：通过 agentic 胶水层 → agentic-store。
  *
- * sql.js WASM 在首次调用时异步初始化（写入 IndexedDB）；失败会 fallback 到 localStorage 再到内存。
+ * 不直接调 agentic-store.createStore，走 `new Agentic()` 的 save/load/has/keys/deleteKey。
+ * 这样以后换 backend 或升级都由胶水层统一管，调用方不用动。
+ *
+ * Vendor 层加载顺序（UMD 自注册 global，靠 import 副作用触发）：
+ *   1. agentic-store.js  → window.AgenticStore
+ *   2. agentic.js        → window.Agentic；其内部 load('agentic-store') 会找到 window.AgenticStore
  */
 import { ref, watch, type Ref } from 'vue'
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore — UMD 文件没 d.ts
+// @ts-ignore — UMD 文件无 .d.ts
 import '../vendor/agentic-store.js'
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
+import '../vendor/agentic.js'
 
-type Store = {
-  get: (k: string) => Promise<unknown>
-  set: (k: string, v: unknown) => Promise<void>
-  delete: (k: string) => Promise<void>
+interface AgenticInstance {
+  save: (key: string, value: unknown) => Promise<void>
+  load: (key: string) => Promise<unknown>
+  has: (key: string) => Promise<boolean>
   keys: () => Promise<string[]>
-  clear: () => Promise<void>
-  has: (k: string) => Promise<boolean>
-  flush?: () => Promise<void>
-  close?: () => Promise<void>
-  backend: string
+  deleteKey: (key: string) => Promise<void>
+  dispose?: () => void
+}
+
+interface AgenticGlobal {
+  Agentic: new (opts?: Record<string, unknown>) => AgenticInstance
+  ai: AgenticInstance
 }
 
 declare global {
   // eslint-disable-next-line no-var
-  var AgenticStore: {
-    createStore: (name: string, opts?: { backend?: string }) => Promise<Store>
-  }
+  var Agentic: AgenticGlobal | undefined
 }
 
-const stores = new Map<string, Promise<Store>>()
+// 每个 namespace 一个独立的 Agentic 实例（共享同一个底层 agentic-store backend）
+// 这样不同 namespace 的 key 互不冲突
+const instances = new Map<string, AgenticInstance>()
 
-/**
- * 获取一个命名的 store。相同 namespace 共享同一个 Promise。
- * 浏览器里是 IndexedDB-backed SQLite WASM，fallback 到 localStorage/内存。
- */
-export function getStore(namespace: string): Promise<Store> {
-  let p = stores.get(namespace)
-  if (!p) {
-    p = globalThis.AgenticStore.createStore(namespace)
-    stores.set(namespace, p)
+function getAgentic(namespace: string): AgenticInstance {
+  let inst = instances.get(namespace)
+  if (!inst) {
+    const G = globalThis.Agentic
+    if (!G) throw new Error('[persist] agentic global not loaded')
+    // store.name 是 agentic-store 的 namespace
+    inst = new G.Agentic({ store: { name: namespace } })
+    instances.set(namespace, inst)
   }
-  return p
+  return inst
 }
 
 /**
  * 绑定一个 reactive ref 到持久化 store。
  *
- * - 首次从 store 读，如果没有就用 fallback
- * - 每次 ref 变就 debounce 写回
- * - 返回 { state, ready, reset }
+ * - 首次从 store 读，没有就用 fallback
+ * - ref 变化 debounce 80ms 写回
+ * - store 不可用时依然返回可用 ref（只是不持久）
  *
  * ```ts
  * const { state: chatPos, ready } = usePersistedState('shell', 'chatPos', 'right')
@@ -68,18 +75,19 @@ export function usePersistedState<T>(
   let timer: number | null = null
   let suppressNextWrite = false
 
-  getStore(namespace).then(async (store) => {
+  ;(async () => {
     try {
-      const saved = await store.get(key)
+      const ai = getAgentic(namespace)
+      const saved = await ai.load(key)
       if (saved !== undefined && saved !== null) {
-        suppressNextWrite = true // 水合时不写回
+        suppressNextWrite = true
         state.value = saved as T
       }
     } catch (err) {
       console.warn('[persist]', namespace, key, 'load failed', err)
     }
     ready.value = true
-  })
+  })()
 
   watch(state, (v) => {
     if (!ready.value) return
@@ -87,8 +95,8 @@ export function usePersistedState<T>(
     if (timer) clearTimeout(timer)
     timer = window.setTimeout(async () => {
       try {
-        const store = await getStore(namespace)
-        await store.set(key, v as unknown)
+        const ai = getAgentic(namespace)
+        await ai.save(key, v as unknown)
       } catch (err) {
         console.warn('[persist]', namespace, key, 'save failed', err)
       }
@@ -97,7 +105,7 @@ export function usePersistedState<T>(
 
   function reset() {
     state.value = fallback
-    getStore(namespace).then((s) => s.delete(key)).catch(() => {})
+    try { getAgentic(namespace).deleteKey(key).catch(() => {}) } catch {}
   }
 
   return { state, ready, reset }
