@@ -45,6 +45,17 @@ export interface AgentState {
 
 export const agentState = reactive<AgentState>({ running: false, error: null })
 
+function stringifyErr(v: unknown): string {
+  if (v === undefined || v === null) return ''
+  if (typeof v === 'string') return v
+  if (v instanceof Error) return v.message
+  try {
+    const s = JSON.stringify(v)
+    if (typeof s === 'string' && s !== '{}') return s
+  } catch {}
+  return String(v)
+}
+
 function buildHistory(): Array<{ role: string; content: string }> {
   return chat.messages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
@@ -117,10 +128,11 @@ export async function agentAsk(prompt: string): Promise<void> {
         }
 
         case 'tool_result': {
-          // agentic-core 上报的字段是 output，不是 result
-          const payload = event.output
+          console.debug('[agent] tool_result event:', event)
+          // agentic-core 上报的字段是 output；也兄容 result/content
+          const payload = event.output ?? event.result ?? event.content
           let text: string
-          if (payload === undefined) text = 'undefined'
+          if (payload === undefined) text = '(no output)'
           else if (payload === null) text = 'null'
           else if (typeof payload === 'string') text = payload
           else {
@@ -134,7 +146,7 @@ export async function agentAsk(prompt: string): Promise<void> {
         }
 
         case 'tool_error': {
-          chat.push('tool', `✖ ${event.name}: ${event.error ?? 'unknown error'}`, {
+          chat.push('tool', `✖ ${event.name}: ${stringifyErr(event.error) || 'unknown error'}`, {
             name: event.name,
             error: event.error,
           })
@@ -142,11 +154,11 @@ export async function agentAsk(prompt: string): Promise<void> {
         }
 
         case 'warning':
-          chat.push('system', `⚠️ ${event.message ?? ''}`)
+          chat.push('system', `⚠️ ${stringifyErr(event.message ?? event.error) || ''}`)
           break
 
         case 'error':
-          chat.push('system', `错误：${event.error ?? event.message ?? 'unknown'}`)
+          chat.push('system', `错误：${stringifyErr(event.error ?? event.message) || 'unknown'}`)
           break
 
         // 其他事件（tool_ready / tool_delta / status / timing / config / done / response）默默吃掉
