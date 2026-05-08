@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { chat, sendOrQueue, agentState, agentSettings } from '@/services'
+import type { AgentImage } from '@/services/agent'
 
 export type ChatPosition = 'left' | 'right' | 'float' | 'hidden'
 
@@ -13,6 +14,10 @@ const input = ref('')
 const showSettings = ref(false)
 const showPending = ref(true)
 const streamRef = ref<HTMLDivElement | null>(null)
+const fileInput = ref<HTMLInputElement | null>(null)
+const attachments = ref<AgentImage[]>([])
+const dragOver = ref(false)
+const previewUrl = ref<string | null>(null)
 
 function scrollBottom() {
   requestAnimationFrame(() => {
@@ -20,11 +25,70 @@ function scrollBottom() {
   })
 }
 
+function fileToImage(file: File): Promise<AgentImage> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error)
+    reader.onload = () => {
+      const dataUrl = reader.result as string
+      const comma = dataUrl.indexOf(',')
+      const data = dataUrl.slice(comma + 1)
+      resolve({ data, media_type: file.type || 'image/png', preview: dataUrl })
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+async function addFiles(files: FileList | File[]) {
+  const arr = Array.from(files)
+  for (const f of arr) {
+    if (!f.type.startsWith('image/')) continue
+    try {
+      const img = await fileToImage(f)
+      attachments.value.push(img)
+    } catch (err) { console.error('[chat/attach]', err) }
+  }
+}
+
+function onPickFiles(e: Event) {
+  const target = e.target as HTMLInputElement
+  if (target.files && target.files.length) addFiles(target.files)
+  target.value = ''
+}
+
+function onPaste(e: ClipboardEvent) {
+  const items = e.clipboardData?.items
+  if (!items) return
+  const files: File[] = []
+  for (const it of Array.from(items)) {
+    if (it.kind === 'file') {
+      const f = it.getAsFile()
+      if (f && f.type.startsWith('image/')) files.push(f)
+    }
+  }
+  if (files.length) {
+    e.preventDefault()
+    addFiles(files)
+  }
+}
+
+function onDrop(e: DragEvent) {
+  e.preventDefault()
+  dragOver.value = false
+  if (e.dataTransfer?.files) addFiles(e.dataTransfer.files)
+}
+
+function removeAttachment(i: number) { attachments.value.splice(i, 1) }
+
 function onSend() {
   const text = input.value.trim()
-  if (!text) return
-  const r = sendOrQueue(text)
-  if (r !== 'empty') input.value = ''
+  if (!text && !attachments.value.length) return
+  const imgs = attachments.value.length ? attachments.value.slice() : undefined
+  const r = sendOrQueue(text, imgs)
+  if (r !== 'empty') {
+    input.value = ''
+    attachments.value = []
+  }
   scrollBottom()
 }
 
@@ -36,6 +100,9 @@ function editPending(id: string, current: string) {
   const next = window.prompt('编辑排队消息：', current)
   if (next !== null && next.trim()) chat.updatePending(id, next.trim())
 }
+
+function openPreview(url: string) { previewUrl.value = url }
+function closePreview() { previewUrl.value = null }
 
 const floatStyle = computed(() =>
   props.position === 'float'
@@ -121,7 +188,16 @@ onBeforeUnmount(() => { stopWatching?.() })
         :class="m.role"
       >
         <div class="role">{{ m.role }}</div>
-        <div class="content">{{ m.content }}</div>
+        <div v-if="m.meta && (m.meta as any).images" class="msg-imgs">
+          <img
+            v-for="(im, i) in ((m.meta as any).images as Array<{preview?: string; media_type: string}>)"
+            :key="i"
+            :src="im.preview"
+            class="thumb"
+            @click="im.preview && openPreview(im.preview)"
+          />
+        </div>
+        <div v-if="m.content" class="content">{{ m.content }}</div>
       </div>
       <div v-if="agentState.running" class="thinking">
         <span class="dot" /><span class="dot" /><span class="dot" />
@@ -139,7 +215,8 @@ onBeforeUnmount(() => { stopWatching?.() })
         <ul v-if="showPending">
           <li v-for="(p, i) in chat.pending" :key="p.id">
             <span class="idx">{{ i + 1 }}</span>
-            <span class="text" :title="p.text" @click="editPending(p.id, p.text)">{{ p.text }}</span>
+            <span v-if="p.images && p.images.length" class="img-badge" :title="`包含 ${p.images.length} 张图片`">🖼 {{ p.images.length }}</span>
+            <span class="text" :title="p.text" @click="editPending(p.id, p.text)">{{ p.text || '(无文本)' }}</span>
             <div class="ops">
               <button class="mini" :disabled="i === 0" @click="movePendingUp(p.id)" title="上移">↑</button>
               <button class="mini" :disabled="i === chat.pending.length - 1" @click="movePendingDown(p.id)" title="下移">↓</button>
@@ -149,18 +226,56 @@ onBeforeUnmount(() => { stopWatching?.() })
         </ul>
       </div>
 
-      <div class="input-row">
+      <!-- 附件已选列表 -->
+      <div v-if="attachments.length" class="attachments">
+        <div
+          v-for="(a, i) in attachments"
+          :key="i"
+          class="att"
+        >
+          <img :src="a.preview" class="att-thumb" @click="a.preview && openPreview(a.preview)" />
+          <button class="att-rm" @click="removeAttachment(i)" title="移除">×</button>
+        </div>
+      </div>
+
+      <div
+        class="input-row"
+        :class="{ 'drag-over': dragOver }"
+        @dragover.prevent="dragOver = true"
+        @dragleave="dragOver = false"
+        @drop="onDrop"
+      >
+        <button
+          class="attach-btn"
+          title="附加图片（也支持粘贴/拖拽）"
+          @click="fileInput?.click()"
+        >📎</button>
+        <input
+          ref="fileInput"
+          type="file"
+          accept="image/*"
+          multiple
+          style="display:none"
+          @change="onPickFiles"
+        />
         <textarea
           v-model="input"
           rows="3"
-          :placeholder="agentState.running ? '输入消息入排队… (Enter 发送)' : '告诉 Agent 你想做什么…'"
+          :placeholder="dragOver ? '松开鼠标添加图片' : (agentState.running ? '输入消息入排队… (Enter 发送，可粘图)' : '告诉 Agent 你想做什么…（可粘/拖拽图片）')"
           @keydown.enter.exact.prevent="onSend"
+          @paste="onPaste"
         />
-        <button class="send" @click="onSend" :disabled="!input.trim()">
+        <button class="send" @click="onSend" :disabled="!input.trim() && !attachments.length">
           {{ agentState.running ? '排队' : '发送' }}
         </button>
       </div>
     </footer>
+
+    <!-- 图片全屏预览 -->
+    <div v-if="previewUrl" class="preview-overlay" @click="closePreview">
+      <img :src="previewUrl" />
+      <button class="preview-close" @click.stop="closePreview">×</button>
+    </div>
   </aside>
 </template>
 
@@ -412,6 +527,103 @@ footer {
 .mini:not(:disabled):hover { background: rgba(255, 255, 255, 0.08); color: var(--fg-1); }
 .mini:disabled { opacity: 0.3; cursor: not-allowed; }
 .mini.danger:not(:disabled):hover { background: rgba(248, 113, 113, 0.2); color: #fca5a5; }
+
+/* 附件 & 图片 */
+.msg-imgs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin: 2px 0;
+}
+.thumb, .att-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: zoom-in;
+  background: var(--surface-1);
+}
+.attachments {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 4px 2px;
+}
+.att { position: relative; }
+.att-rm {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  background: rgba(248, 113, 113, 0.9);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.img-badge {
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(94, 234, 212, 0.18);
+  color: #5eead4;
+  flex-shrink: 0;
+}
+.attach-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: var(--surface-3);
+  color: var(--fg-3);
+  cursor: pointer;
+  font-size: 14px;
+  align-self: flex-end;
+  flex-shrink: 0;
+}
+.attach-btn:hover { background: rgba(255,255,255,0.08); color: var(--fg-1); }
+.input-row.drag-over {
+  outline: 2px dashed rgba(99, 163, 255, 0.7);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* 全屏预览 */
+.preview-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.88);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+.preview-overlay img {
+  max-width: 92vw;
+  max-height: 92vh;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+.preview-close {
+  position: fixed;
+  top: 20px;
+  right: 24px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  border: none;
+  font-size: 18px;
+  cursor: pointer;
+}
 .send {
   align-self: flex-end;
   background: rgba(99, 163, 255, 0.22);

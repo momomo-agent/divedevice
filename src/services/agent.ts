@@ -104,22 +104,28 @@ function buildTools() {
   }))
 }
 
+export interface AgentImage {
+  data: string           // base64 (no data: prefix)
+  media_type: string     // 'image/png' / 'image/jpeg' etc.
+  preview?: string       // data: URL 做缩略图（可选）
+}
+
 /**
  * 统一入口：空闲时直接走 agentAsk；running 时排进 pending 队列，
  * agentAsk 的 finally 会自动 dequeue 继续跑。
  */
-export function sendOrQueue(prompt: string): 'sent' | 'queued' | 'empty' {
+export function sendOrQueue(prompt: string, images?: AgentImage[]): 'sent' | 'queued' | 'empty' {
   const text = prompt.trim()
-  if (!text) return 'empty'
+  if (!text && !(images && images.length)) return 'empty'
   if (agentState.running) {
-    chat.enqueue(text)
+    chat.enqueue(text, images)
     return 'queued'
   }
-  agentAsk(text).catch(() => {})
+  agentAsk(text, images).catch(() => {})
   return 'sent'
 }
 
-export async function agentAsk(prompt: string): Promise<void> {
+export async function agentAsk(prompt: string, images?: AgentImage[]): Promise<void> {
   if (agentState.running) return
   agentState.error = null
   agentState.running = true
@@ -131,7 +137,7 @@ export async function agentAsk(prompt: string): Promise<void> {
     return
   }
 
-  chat.push('user', prompt)
+  chat.push('user', prompt, images && images.length ? { images: images.map(i => ({ preview: i.preview, media_type: i.media_type })) } : undefined)
   const assistantMsg = chat.push('assistant', '')
 
   try {
@@ -152,6 +158,7 @@ export async function agentAsk(prompt: string): Promise<void> {
       system: `${system}\n\n${desktopPromptBlock()}`,
       tools: buildTools(),
       history,
+      images: images && images.length ? images.map(i => ({ data: i.data, media_type: i.media_type, detail: 'auto' })) : undefined,
       stream: true,
     })
 
@@ -229,8 +236,7 @@ export async function agentAsk(prompt: string): Promise<void> {
     // 排队的下一条自动接着跑
     const next = chat.dequeue()
     if (next) {
-      // 不 await 避免递归栈不断叠；setTimeout 0 让出循环
-      setTimeout(() => { agentAsk(next.text).catch(() => {}) }, 0)
+      setTimeout(() => { agentAsk(next.text, next.images).catch(() => {}) }, 0)
     }
   }
 }

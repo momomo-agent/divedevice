@@ -17,6 +17,7 @@ export interface ChatMessage {
 export interface PendingItem {
   id: string
   text: string
+  images?: Array<{ data: string; media_type: string; preview?: string }>
   createdAt: number
 }
 
@@ -50,8 +51,8 @@ export const chat = {
   // ---- Pending queue ----
 
   /** 入队，返回 pending item */
-  enqueue(text: string): PendingItem {
-    const item: PendingItem = { id: `p${++_pid}`, text, createdAt: Date.now() }
+  enqueue(text: string, images?: Array<{ data: string; media_type: string; preview?: string }>): PendingItem {
+    const item: PendingItem = { id: `p${++_pid}`, text, images, createdAt: Date.now() }
     state.pending.push(item)
     return item
   },
