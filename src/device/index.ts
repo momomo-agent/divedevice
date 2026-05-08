@@ -144,6 +144,16 @@ export interface DeviceAPI {
 
   screen: {
     capture(): Promise<Uint8Array>
+    /** 直传 raw framebuffer（RGBA8888 或设备原生格式），用于实时投屏跳过 PNG encode */
+    frame(): Promise<{
+      width: number
+      height: number
+      data: Uint8Array
+      redOffset: number; redLength: number
+      greenOffset: number; greenLength: number
+      blueOffset: number; blueLength: number
+      alphaOffset: number; alphaLength: number
+    }>
   }
 
   app: {
@@ -387,6 +397,22 @@ class AdbDeviceAPI implements DeviceAPI {
     capture: async (): Promise<Uint8Array> => {
       const proc = await this.conn.adb.subprocess.noneProtocol.spawn('screencap -p')
       return this.readAll(proc.output as unknown as RS<Uint8Array>)
+    },
+    frame: async () => {
+      const fb = await this.conn.adb.framebuffer()
+      return {
+        width: fb.width,
+        height: fb.height,
+        data: fb.data,
+        redOffset: fb.red_offset,
+        redLength: fb.red_length,
+        greenOffset: fb.green_offset,
+        greenLength: fb.green_length,
+        blueOffset: fb.blue_offset,
+        blueLength: fb.blue_length,
+        alphaOffset: fb.alpha_offset,
+        alphaLength: fb.alpha_length,
+      }
     },
   }
 
