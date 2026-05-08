@@ -102,37 +102,55 @@ export async function agentAsk(prompt: string): Promise<void> {
     for await (const event of iter) {
       switch (event.type) {
         case 'text_delta':
-          assistantMsg.content += event.text
+          if (typeof event.text === 'string') assistantMsg.content += event.text
           break
-        case 'tool_use':
-          chat.push('tool', `→ ${event.name}(${JSON.stringify(event.input)})`, {
+
+        case 'tool_use': {
+          const input = event.input ?? {}
+          let inputStr: string
+          try { inputStr = JSON.stringify(input) } catch { inputStr = String(input) }
+          chat.push('tool', `→ ${event.name}(${inputStr})`, {
             name: event.name,
             input: event.input,
           })
           break
+        }
+
         case 'tool_result': {
-          const payload = event.error !== undefined && event.result === undefined
-            ? { error: event.error }
-            : event.result
+          // agentic-core 上报的字段是 output，不是 result
+          const payload = event.output
           let text: string
           if (payload === undefined) text = 'undefined'
           else if (payload === null) text = 'null'
           else if (typeof payload === 'string') text = payload
           else {
             try { text = JSON.stringify(payload) } catch { text = String(payload) }
-            if (text === undefined) text = String(payload)
+            if (typeof text !== 'string') text = String(payload)
           }
           chat.push('tool', `← ${text.length > 400 ? text.slice(0, 400) + '…' : text}`, {
-            result: event.result,
+            output: event.output,
+          })
+          break
+        }
+
+        case 'tool_error': {
+          chat.push('tool', `✖ ${event.name}: ${event.error ?? 'unknown error'}`, {
+            name: event.name,
             error: event.error,
           })
           break
         }
+
         case 'warning':
-          chat.push('system', `⚠️ ${event.message}`)
+          chat.push('system', `⚠️ ${event.message ?? ''}`)
           break
+
         case 'error':
-          chat.push('system', `错误：${event.message ?? event}`)
+          chat.push('system', `错误：${event.error ?? event.message ?? 'unknown'}`)
+          break
+
+        // 其他事件（tool_ready / tool_delta / status / timing / config / done / response）默默吃掉
+        default:
           break
       }
     }
