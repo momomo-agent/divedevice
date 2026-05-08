@@ -72,7 +72,7 @@ export async function agentAsk(prompt: string): Promise<void> {
   agentState.error = null
   agentState.running = true
 
-  const { provider, apiKey, baseUrl, proxyUrl, model, system } = agentSettings
+  const { provider, apiKey, baseUrl, proxyUrl, proxyEnabled, model, system } = agentSettings
   if (!apiKey) {
     chat.push('system', '未配置 API Key。点击对话框右上角齿轮配置。')
     agentState.running = false
@@ -91,7 +91,7 @@ export async function agentAsk(prompt: string): Promise<void> {
       provider,
       apiKey,
       baseUrl: baseUrl || undefined,
-      proxyUrl: proxyUrl || undefined,
+      proxyUrl: proxyEnabled && proxyUrl ? proxyUrl : undefined,
       model,
       system,
       tools: buildTools(),

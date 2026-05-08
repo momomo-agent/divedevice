@@ -78,8 +78,15 @@ onBeforeUnmount(() => { stopWatching?.() })
         <input v-model="agentSettings.baseUrl" placeholder="留空走官方端点" />
       </div>
       <div class="row">
+        <label>Proxy</label>
+        <label class="switch" title="启用后所有请求转发到 Proxy URL">
+          <input type="checkbox" v-model="agentSettings.proxyEnabled" />
+          <span>{{ agentSettings.proxyEnabled ? '已启用' : '已关闭' }}</span>
+        </label>
+      </div>
+      <div class="row" v-if="agentSettings.proxyEnabled">
         <label>Proxy URL</label>
-        <input v-model="agentSettings.proxyUrl" placeholder="留空直连；如 https://proxy.momomo.dev/" />
+        <input v-model="agentSettings.proxyUrl" placeholder="如 https://proxy.momomo.dev/" />
       </div>
       <div class="row">
         <label>Model</label>
@@ -213,6 +220,19 @@ header .title {
 }
 .settings .row textarea { resize: vertical; min-height: 48px; }
 .settings .row.system { align-items: flex-start; }
+.settings .row .switch {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface-1);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  padding: 3px 8px;
+  cursor: pointer;
+  color: var(--fg-2);
+}
+.settings .row .switch input { margin: 0; }
 
 .stream {
   flex: 1;
