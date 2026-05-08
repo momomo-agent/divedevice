@@ -27,6 +27,7 @@ const listRef = ref<HTMLDivElement | null>(null)
 const MAX_LINES = 3000
 
 // Sidebar 状态
+const sidebarOpen = ref(true)
 const buffer = ref<Buffer>('main')
 const preset = ref<Preset>(null)
 const selectedTag = ref<string | null>(null)
@@ -239,6 +240,7 @@ useAppController({
     preset: preset.value,
     selectedTag: selectedTag.value,
     selectedPid: selectedPid.value,
+    sidebarOpen: sidebarOpen.value,
   }),
   describe: () => ({
     events: [
@@ -252,6 +254,7 @@ useAppController({
       { name: 'preset', description: 'Apply preset filter. payload: {preset: null|"foreground"|"errors"|"crashes"|"anr"|"choreographer"}' },
       { name: 'selectTag', description: 'Filter to a tag (toggle). payload: {tag: string|null}' },
       { name: 'selectPid', description: 'Filter to a pid (toggle). payload: {pid: number|null}' },
+      { name: 'toggleSidebar', description: 'payload: {open?: boolean}' },
     ],
   }),
   send(event, payload) {
@@ -289,6 +292,9 @@ useAppController({
         selectedPid.value = p.pid === null || p.pid === undefined ? null : Number(p.pid)
         return { ok: true, selectedPid: selectedPid.value }
       }
+      case 'toggleSidebar':
+        sidebarOpen.value = 'open' in p ? !!p.open : !sidebarOpen.value
+        return { ok: true, sidebarOpen: sidebarOpen.value }
       default: throw new Error(`Unknown logcat event: ${event}`)
     }
   },
@@ -297,7 +303,11 @@ useAppController({
 
 <template>
   <div class="logcat">
-    <aside class="sidebar">
+    <aside v-if="sidebarOpen" class="sidebar">
+      <div class="side-head">
+        <span class="side-title">Logcat</span>
+        <button class="collapse" title="收起侧栏" @click="sidebarOpen = false">←</button>
+      </div>
       <section class="sec">
         <h4>Buffer</h4>
         <div class="buffer-row">
@@ -372,6 +382,7 @@ useAppController({
 
     <div class="main">
       <div class="toolbar">
+        <button v-if="!sidebarOpen" class="side-toggle" @click="sidebarOpen = true" title="展开侧栏">→</button>
         <button v-if="!paused" @click="paused = true" title="暂停">⏸</button>
         <button v-else @click="paused = false" title="恢复">▶</button>
         <button @click="clear" title="清空">🗑</button>
@@ -412,6 +423,28 @@ useAppController({
   display: flex; flex-direction: column; gap: 10px;
   font-size: 11px;
 }
+.side-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 2px 4px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.side-title {
+  font-size: 10px; font-weight: 600;
+  color: var(--fg-2);
+  text-transform: uppercase; letter-spacing: 0.8px;
+}
+.collapse {
+  width: 22px; height: 22px;
+  background: transparent; border: none; border-radius: 4px;
+  color: var(--fg-3); cursor: pointer; font-size: 12px;
+}
+.collapse:hover { background: rgba(255,255,255,0.06); color: var(--fg-1); }
+.side-toggle {
+  background: transparent; border: none; border-radius: 4px;
+  color: var(--fg-2); cursor: pointer; font-size: 12px;
+  padding: 3px 6px;
+}
+.side-toggle:hover { background: rgba(255,255,255,0.06); color: var(--fg-1); }
 .sec h4 {
   margin: 0 0 4px; padding: 0 2px;
   font-size: 10px; font-weight: 600;
