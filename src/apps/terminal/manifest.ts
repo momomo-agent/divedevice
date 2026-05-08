@@ -1,5 +1,4 @@
 import type { AppManifest } from '@/types'
-import { getDevice } from '@/device'
 import Window from './Window.vue'
 
 export const terminalManifest: AppManifest = {
@@ -9,20 +8,8 @@ export const terminalManifest: AppManifest = {
   component: Window,
   requiresDevice: true,
   windowDefaults: { width: 680, height: 420, resizable: true, minWidth: 400, minHeight: 220 },
-  tools: [
-    {
-      name: 'shell.exec',
-      description: '在 Android 设备上执行 shell 命令，返回 stdout/stderr/exitCode。',
-      parameters: {
-        type: 'object',
-        properties: { cmd: { type: 'string', description: 'shell 命令' } },
-        required: ['cmd'],
-      },
-      async execute(args, ctx) {
-        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
-        if (!d) throw new Error('未绑定设备')
-        return d.shell.exec(String(args.cmd))
-      },
-    },
-  ],
+  // shell.exec 已由 inspector 统一提供（系统工具聚合 app）。
+  // terminal 是交互式 pty，不在 manifest 里暴露一次性 exec tool。
+  // 对话时可通过 appController 的 `runCommand` / `newTab` / `sigint` 等事件驱动当前 UI。
+  tools: [],
 }

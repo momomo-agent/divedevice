@@ -313,51 +313,8 @@ export const inspectorManifest: AppManifest = {
         return { ok: true }
       },
     },
-    {
-      name: 'input.tap',
-      description: 'adb shell input tap 。',
-      parameters: {
-        type: 'object',
-        properties: { x: { type: 'number' }, y: { type: 'number' } },
-        required: ['x', 'y'],
-      },
-      async execute(args, ctx) {
-        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
-        if (!d) throw new Error('未绑定设备')
-        await d.input.tap(Number(args.x), Number(args.y))
-        return { ok: true }
-      },
-    },
-    {
-      name: 'input.swipe',
-      description: 'adb shell input swipe 。',
-      parameters: {
-        type: 'object',
-        properties: { x1: { type: 'number' }, y1: { type: 'number' }, x2: { type: 'number' }, y2: { type: 'number' }, durationMs: { type: 'number' } },
-        required: ['x1', 'y1', 'x2', 'y2'],
-      },
-      async execute(args, ctx) {
-        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
-        if (!d) throw new Error('未绑定设备')
-        await d.input.swipe(
-          Number(args.x1), Number(args.y1),
-          Number(args.x2), Number(args.y2),
-          args.durationMs ? Number(args.durationMs) : undefined,
-        )
-        return { ok: true }
-      },
-    },
-    {
-      name: 'input.key',
-      description: 'input keyevent。code 可以是数字 keycode 或 "KEYCODE_HOME" 这种。',
-      parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] },
-      async execute(args, ctx) {
-        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
-        if (!d) throw new Error('未绑定设备')
-        await d.input.key(String(args.code))
-        return { ok: true }
-      },
-    },
+    // input.tap / input.swipe / input.key 由 Screencast 提供（投屏交互是他的本职）。
+    // Inspector 只保留 input.text（输入文本，与投屏无关，排故时常用）。
     {
       name: 'input.text',
       description: 'adb shell input text 。',
