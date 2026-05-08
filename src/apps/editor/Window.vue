@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch, reactive } from 'vue'
 import * as monaco from 'monaco-editor'
-import { useDevice, useWindow, useEventbus, useWindowManager } from '@/composables'
+import { useDevice, useWindow, useEventbus, useWindowManager, useAppController } from '@/composables'
 
 const { window: win } = useWindow()
 const device = useDevice()
@@ -120,6 +120,58 @@ function closeTab(id: string) {
 function activate(id: string) {
   activeId.value = id
 }
+
+useAppController({
+  getState: () => ({
+    tabs: tabs.map((t) => ({ id: t.id, path: t.path, dirty: t.dirty })),
+    activeTabId: activeId.value,
+    activePath: tabs.find((t) => t.id === activeId.value)?.path ?? null,
+  }),
+  describe: () => ({
+    events: [
+      { name: 'open', description: 'Open a file path (reuse tab if already open). payload: {path: string}' },
+      { name: 'selectTab', description: 'Activate a tab. payload: {tabId?: string, path?: string}' },
+      { name: 'closeTab', description: 'Close a tab. payload: {tabId?: string, path?: string}' },
+      { name: 'save', description: 'Save current or specific tab. payload?: {tabId?: string}' },
+    ],
+  }),
+  async send(event, payload) {
+    const p = (payload ?? {}) as Record<string, unknown>
+    switch (event) {
+      case 'open': {
+        const target = String(p.path ?? '')
+        if (!target) throw new Error('open requires payload.path')
+        await openFile(target)
+        return { ok: true, activePath: tabs.find((t) => t.id === activeId.value)?.path ?? null }
+      }
+      case 'selectTab': {
+        let id: string | undefined
+        if (typeof p.tabId === 'string') id = p.tabId
+        else if (typeof p.path === 'string') id = tabs.find((t) => t.path === p.path)?.id
+        if (!id) throw new Error('selectTab requires payload.tabId or payload.path (matching an open tab)')
+        activate(id)
+        return { ok: true, activeTabId: activeId.value }
+      }
+      case 'closeTab': {
+        let id: string | undefined
+        if (typeof p.tabId === 'string') id = p.tabId
+        else if (typeof p.path === 'string') id = tabs.find((t) => t.path === p.path)?.id
+        else id = activeId.value ?? undefined
+        if (!id) throw new Error('no tab to close')
+        closeTab(id)
+        return { ok: true, remaining: tabs.length }
+      }
+      case 'save': {
+        let tab = typeof p.tabId === 'string' ? tabs.find((t) => t.id === p.tabId) : undefined
+        if (!tab) tab = tabs.find((t) => t.id === activeId.value)
+        if (!tab) throw new Error('no active tab to save')
+        await save(tab)
+        return { ok: true, path: tab.path, dirty: tab.dirty }
+      }
+      default: throw new Error(`Unknown editor event: ${event}`)
+    }
+  },
+})
 
 watch(activeId, (id) => {
   const tab = tabs.find((t) => t.id === id)

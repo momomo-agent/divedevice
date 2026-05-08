@@ -52,3 +52,5 @@ export function useDeviceHub() {
 }
 
 export { useComposingLock, isImeKeydown } from './useComposingLock'
+export { useAppController } from './useAppController'
+export type { AppControllerLocal } from './useAppController'

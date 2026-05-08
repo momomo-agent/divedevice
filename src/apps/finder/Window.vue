@@ -5,7 +5,7 @@
  * + 三视图：Icons / List / Columns
  */
 import { ref, watch, computed, onBeforeUnmount } from 'vue'
-import { useDevice, useWindow, useEventbus } from '@/composables'
+import { useDevice, useWindow, useEventbus, useAppController } from '@/composables'
 import { windowManager, lookupFileAssoc, isImageFile } from '@/services'
 import type { FileEntry } from '@/device'
 
@@ -99,6 +99,57 @@ const crumbs = computed(() => {
     acc.push({ name: part, path: p })
   }
   return acc
+})
+
+// ---- App controller: expose state + events to desktop.send ----
+useAppController({
+  getState: () => ({
+    path: path.value,
+    view: view.value,
+    search: searchQ.value,
+    selected: selected.value,
+    entryCount: entries.value.length,
+  }),
+  describe: () => ({
+    events: [
+      { name: 'navigate', description: 'Go to a path. payload: {path: string}' },
+      { name: 'back', description: 'Go back in history' },
+      { name: 'forward', description: 'Go forward in history' },
+      { name: 'up', description: 'Go to parent directory' },
+      { name: 'setView', description: 'Change layout. payload: {view: "icons"|"list"|"columns"}' },
+      { name: 'search', description: 'Filter current dir. payload: {query: string}' },
+      { name: 'refresh', description: 'Reload current dir' },
+    ],
+  }),
+  async send(event, payload) {
+    const p = (payload ?? {}) as Record<string, unknown>
+    switch (event) {
+      case 'navigate': {
+        const target = String(p.path ?? '')
+        if (!target) throw new Error('navigate requires payload.path')
+        path.value = target
+        return { ok: true, path: path.value }
+      }
+      case 'back': back(); return { ok: true, path: path.value }
+      case 'forward': forward(); return { ok: true, path: path.value }
+      case 'up': goUp(); return { ok: true, path: path.value }
+      case 'setView': {
+        const v = String(p.view ?? '')
+        if (v !== 'icons' && v !== 'list' && v !== 'columns') throw new Error('view must be icons|list|columns')
+        view.value = v
+        return { ok: true, view: view.value }
+      }
+      case 'search': {
+        searchQ.value = String(p.query ?? '')
+        return { ok: true, search: searchQ.value, matches: visible.value.length }
+      }
+      case 'refresh': {
+        await load()
+        return { ok: true, entryCount: entries.value.length }
+      }
+      default: throw new Error(`Unknown finder event: ${event}`)
+    }
+  },
 })
 
 function onEnter(entry: FileEntry) {

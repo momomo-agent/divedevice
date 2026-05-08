@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, nextTick, computed, watch } from 'vue'
-import { useDevice, useWindow } from '@/composables'
+import { useDevice, useWindow, useAppController } from '@/composables'
 import type { SpawnedProcess } from '@/device'
 
 const { window: win } = useWindow()
@@ -101,6 +101,45 @@ function colorOf(level: string): string {
 onMounted(start)
 onBeforeUnmount(stop)
 watch(() => win.value.deviceId, () => { lines.value = []; start() })
+
+useAppController({
+  getState: () => ({
+    paused: paused.value,
+    filter: filter.value,
+    levels: { ...levels.value },
+    autoScroll: autoScroll.value,
+    lineCount: lines.value.length,
+    filteredCount: filtered.value.length,
+  }),
+  describe: () => ({
+    events: [
+      { name: 'setFilter', description: 'Set substring filter. payload: {query: string}' },
+      { name: 'setLevels', description: 'Enable/disable levels. payload: {levels: {V?,D?,I?,W?,E?,F?: boolean}}' },
+      { name: 'pause', description: 'Pause tailing' },
+      { name: 'resume', description: 'Resume tailing' },
+      { name: 'clear', description: 'Clear local buffer' },
+      { name: 'autoScroll', description: 'Toggle auto scroll. payload: {enabled: boolean}' },
+    ],
+  }),
+  send(event, payload) {
+    const p = (payload ?? {}) as Record<string, unknown>
+    switch (event) {
+      case 'setFilter': filter.value = String(p.query ?? ''); return { ok: true, filter: filter.value }
+      case 'setLevels': {
+        const incoming = (p.levels ?? {}) as Record<string, unknown>
+        for (const k of Object.keys(levels.value) as Array<keyof typeof levels.value>) {
+          if (k in incoming) levels.value[k] = !!incoming[k]
+        }
+        return { ok: true, levels: { ...levels.value } }
+      }
+      case 'pause': paused.value = true; return { ok: true }
+      case 'resume': paused.value = false; return { ok: true }
+      case 'clear': clear(); return { ok: true }
+      case 'autoScroll': autoScroll.value = !!p.enabled; return { ok: true, autoScroll: autoScroll.value }
+      default: throw new Error(`Unknown logcat event: ${event}`)
+    }
+  },
+})
 </script>
 
 <template>

@@ -4,7 +4,7 @@
  * 多 tab：Overview / Activities / Processes / Layers / Graphics / Battery / Network / Props
  */
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
-import { useDevice, useWindow } from '@/composables'
+import { useDevice, useWindow, useAppController } from '@/composables'
 import Overview from './panels/Overview.vue'
 import Activities from './panels/Activities.vue'
 import Processes from './panels/Processes.vue'
@@ -51,6 +51,39 @@ function refresh() { refreshKey.value++ }
 
 onBeforeUnmount(stopAuto)
 watch(() => win.value.deviceId, () => { refresh() })
+
+useAppController({
+  getState: () => ({
+    activePanel: active.value,
+    autoRefresh: auto.value,
+    availablePanels: tabs.map((t) => t.id),
+  }),
+  describe: () => ({
+    events: [
+      { name: 'selectPanel', description: `Switch tab. payload: {panel: ${tabs.map((t) => `"${t.id}"`).join('|')}}` },
+      { name: 'refresh', description: 'Refresh current panel' },
+      { name: 'autoRefresh', description: 'Toggle auto-refresh. payload: {enabled: boolean}' },
+    ],
+  }),
+  send(event, payload) {
+    const p = (payload ?? {}) as Record<string, unknown>
+    switch (event) {
+      case 'selectPanel': {
+        const panel = String(p.panel ?? '')
+        if (!tabs.some((t) => t.id === panel)) throw new Error(`invalid panel: ${panel}. Valid: ${tabs.map((t) => t.id).join(',')}`)
+        active.value = panel as TabId
+        return { ok: true, activePanel: active.value }
+      }
+      case 'refresh': refresh(); return { ok: true }
+      case 'autoRefresh': {
+        const enabled = !!p.enabled
+        if (enabled) startAuto(); else stopAuto()
+        return { ok: true, autoRefresh: auto.value }
+      }
+      default: throw new Error(`Unknown inspector event: ${event}`)
+    }
+  },
+})
 </script>
 
 <template>

@@ -9,6 +9,7 @@ import { appRegistry } from './app-registry'
 import { windowManager } from './window-manager'
 import { deviceHub } from './device-hub'
 import { toolbus } from './toolbus'
+import { appControllers } from './app-controllers'
 import type { ToolDefinition, WindowInstance } from '@/types'
 
 /** 快照：可序列化，既给 tool 返回，也给 system prompt 注入 */
@@ -26,6 +27,10 @@ export interface DesktopSnapshot {
     zIndex: number
     state: string
     frame: { x: number; y: number; width: number; height: number }
+    /** 窗口内部自报的状态，由 controller.getState() 提供 */
+    inner?: unknown
+    /** 支持哪些 desktop.send(event) */
+    sendable?: Array<{ name: string; description: string }>
   }>
   focusedWindowId: string | null
 }
@@ -38,6 +43,17 @@ export function desktopSnapshot(): DesktopSnapshot {
     .sort((a, b) => b.zIndex - a.zIndex) // 顶上的在前
     .map((w) => {
       const app = appRegistry.get(w.appId)
+      const ctrl = appControllers.get(w.id)
+      let inner: unknown
+      let sendable: Array<{ name: string; description: string }> | undefined
+      try {
+        if (ctrl?.getState) inner = ctrl.getState()
+      } catch (err) {
+        inner = { _error: (err as Error).message }
+      }
+      try {
+        if (ctrl?.describe) sendable = ctrl.describe().events
+      } catch { /* ignore */ }
       return {
         windowId: w.id,
         appId: w.appId,
@@ -48,6 +64,8 @@ export function desktopSnapshot(): DesktopSnapshot {
         zIndex: w.zIndex,
         state: w.state,
         frame: { ...w.frame },
+        inner,
+        sendable,
       }
     })
   return {
@@ -75,6 +93,16 @@ export function desktopPromptBlock(): string {
       const f = w.focused ? ' *focused*' : ''
       const dev = w.deviceId ? ` dev=${w.deviceId.slice(-4)}` : ''
       lines.push(`  - ${w.windowId} ${w.appId} "${w.title}"${dev}${f}`)
+      if (w.inner && typeof w.inner === 'object') {
+        try {
+          const json = JSON.stringify(w.inner)
+          if (json.length <= 200) lines.push(`      state: ${json}`)
+          else lines.push(`      state: ${json.slice(0, 200)}…`)
+        } catch { /* ignore */ }
+      }
+      if (w.sendable && w.sendable.length) {
+        lines.push(`      sendable: ${w.sendable.map((e) => e.name).join(', ')}`)
+      }
     }
   }
   lines.push('</desktop-state>')
@@ -224,10 +252,97 @@ const closeAllTool: ToolDefinition = {
   },
 }
 
+const sendTool: ToolDefinition = {
+  name: 'desktop.send',
+  description: '向一个打开的 app 窗口发送应用内事件，让它切 tab / 跳路径 / 切 panel / 搜索 … 。每个 app 支持的事件表在 desktop.snapshot 的 windows[].sendable 里，或调 desktop.describeApp 单看。定位窗口的两种方式：传 windowId（精准），或传 appId（自动取最上面的那个同类窗口，没就发给所有）。',
+  parameters: {
+    type: 'object',
+    properties: {
+      windowId: { type: 'string', description: '优先用：精准找某个窗口' },
+      appId: { type: 'string', description: '没希 windowId 时用：按 appId 自动定位。如果有多个同类窗口，默认取 zIndex 最高' },
+      event: { type: 'string', description: 'app 内事件名（由 app describe() 声明）' },
+      payload: { type: 'object', description: '该事件的参数（每个事件自己约定）' },
+      broadcast: { type: 'string', description: 'app 下有多窗口时 「all」：全发；「top」：只发最上面（默认）' },
+    },
+    required: ['event'],
+  },
+  async execute(args) {
+    const event = String(args.event)
+    const payload = (args.payload && typeof args.payload === 'object') ? args.payload as Record<string, unknown> : undefined
+    const broadcast = (args.broadcast ? String(args.broadcast) : 'top') as 'top' | 'all'
+
+    // 选窗口
+    let targets: string[] = []
+    if (args.windowId) {
+      const id = String(args.windowId)
+      if (!appControllers.get(id)) throw new Error(`No controller for windowId=${id} (window may not be mounted or app doesn't register a controller)`)
+      targets = [id]
+    } else if (args.appId) {
+      const appId = String(args.appId)
+      const candidates = appControllers.listByApp(appId)
+      if (!candidates.length) throw new Error(`No open window for appId=${appId}. Open it first via desktop.open, then desktop.send.`)
+      if (broadcast === 'all') {
+        targets = candidates.map((c) => c.windowId)
+      } else {
+        const top = [...windowManager.windows]
+          .filter((w) => w.appId === appId)
+          .sort((a, b) => b.zIndex - a.zIndex)[0]
+        targets = top ? [top.id] : [candidates[0].windowId]
+      }
+    } else {
+      throw new Error('desktop.send requires either windowId or appId')
+    }
+
+    const results: Array<{ windowId: string; ok: boolean; result?: unknown; error?: string }> = []
+    for (const wid of targets) {
+      const ctrl = appControllers.get(wid)
+      if (!ctrl) { results.push({ windowId: wid, ok: false, error: 'controller missing' }); continue }
+      if (!ctrl.send) { results.push({ windowId: wid, ok: false, error: `app ${ctrl.appId} does not accept desktop.send` }); continue }
+      try {
+        const r = await ctrl.send(event, payload)
+        results.push({ windowId: wid, ok: true, result: r })
+      } catch (err) {
+        results.push({ windowId: wid, ok: false, error: (err as Error).message ?? String(err) })
+      }
+    }
+    return { ok: results.every((r) => r.ok), sent: results.length, results }
+  },
+}
+
+const describeAppTool: ToolDefinition = {
+  name: 'desktop.describeApp',
+  description: '查看一个 app 的打开窗口当前状态 + 可接收的 desktop.send 事件。可传 windowId 或 appId。',
+  parameters: {
+    type: 'object',
+    properties: {
+      windowId: { type: 'string' },
+      appId: { type: 'string' },
+    },
+  },
+  async execute(args) {
+    let ctrls = [] as ReturnType<typeof appControllers.all>
+    if (args.windowId) {
+      const c = appControllers.get(String(args.windowId))
+      if (c) ctrls = [c]
+    } else if (args.appId) {
+      ctrls = appControllers.listByApp(String(args.appId))
+    } else {
+      ctrls = appControllers.all()
+    }
+    return ctrls.map((c) => ({
+      windowId: c.windowId,
+      appId: c.appId,
+      state: (() => { try { return c.getState?.() } catch (e) { return { _error: (e as Error).message } } })(),
+      events: (() => { try { return c.describe?.().events ?? [] } catch { return [] } })(),
+    }))
+  },
+}
+
 export function registerDesktopTools() {
   for (const t of [
     snapshotTool, listAppsTool, listWindowsTool,
     openTool, focusTool, closeTool, setFrameTool, closeAllTool,
+    sendTool, describeAppTool,
   ]) {
     toolbus.register(t, 'desktop')
   }

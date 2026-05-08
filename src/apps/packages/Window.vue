@@ -4,7 +4,7 @@
  * 列表 + 搜索 + 过滤（全部/第三方/系统/已禁用） + 选中操作（启动/停止/清数据/禁用/启用/卸载）
  */
 import { ref, computed, watch, shallowRef, onBeforeUnmount } from 'vue'
-import { useDevice, useWindow } from '@/composables'
+import { useDevice, useWindow, useAppController } from '@/composables'
 import { chat } from '@/services'
 import type { PackageInfo } from '@/device'
 
@@ -70,6 +70,42 @@ async function ensureInfo(pkg: string) {
 watch(selected, (p) => { if (p) ensureInfo(p) }, { immediate: true })
 
 const selectedInfo = computed(() => selected.value ? infoMap.value[selected.value] : null)
+
+useAppController({
+  getState: () => ({
+    filter: filter.value,
+    query: query.value,
+    selected: selected.value,
+    selectedName: selectedInfo.value?.versionName ? `${selected.value} ${selectedInfo.value.versionName}` : selected.value,
+    pkgCount: pkgs.value.length,
+  }),
+  describe: () => ({
+    events: [
+      { name: 'setFilter', description: 'Filter list. payload: {filter: "all"|"thirdParty"|"system"|"disabled"}' },
+      { name: 'search', description: 'Search by package name. payload: {query: string}' },
+      { name: 'select', description: 'Select a package by name. payload: {package: string}' },
+    ],
+  }),
+  send(event, payload) {
+    const p = (payload ?? {}) as Record<string, unknown>
+    switch (event) {
+      case 'setFilter': {
+        const f = String(p.filter ?? '')
+        if (!['all', 'thirdParty', 'system', 'disabled'].includes(f)) throw new Error('invalid filter')
+        filter.value = f as Filter
+        return { ok: true, filter: filter.value }
+      }
+      case 'search': query.value = String(p.query ?? ''); return { ok: true, query: query.value }
+      case 'select': {
+        const pkg = String(p.package ?? '')
+        if (!pkg) throw new Error('select requires payload.package')
+        selected.value = pkg
+        return { ok: true, selected: selected.value }
+      }
+      default: throw new Error(`Unknown packages event: ${event}`)
+    }
+  },
+})
 
 // ---- 操作 ----
 async function op(kind: 'launch' | 'stop' | 'clear' | 'disable' | 'enable' | 'uninstall', pkg: string) {
