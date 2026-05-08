@@ -60,6 +60,23 @@ class TransportManager {
     return this.connectUsb(device)
   }
 
+  /** 启动时自动再连浏览器记住授权的设备 */
+  async autoReconnectAuthorized(): Promise<AdbConnection[]> {
+    if (!this.webUsbSupported) return []
+    const mgr = AdbDaemonWebUsbDeviceManager.BROWSER
+    if (!mgr) return []
+    const devs = await mgr.getDevices().catch(() => [] as AdbDaemonWebUsbDevice[])
+    const ok: AdbConnection[] = []
+    for (const d of devs) {
+      try {
+        ok.push(await this.connectUsb(d))
+      } catch (err) {
+        console.warn('[transport] autoReconnect skip', d.serial, err)
+      }
+    }
+    return ok
+  }
+
   private async connectUsb(device: AdbDaemonWebUsbDevice): Promise<AdbConnection> {
     const connection = await device.connect()
 

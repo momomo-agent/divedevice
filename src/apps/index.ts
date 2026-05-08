@@ -1,10 +1,18 @@
-/**
- * 启动时注册所有内置 app。
- * 新增 app 就在这里加一行 register。
- */
 import { appRegistry } from '@/services/app-registry'
 import { finderManifest } from './finder/manifest'
+import { terminalManifest } from './terminal/manifest'
+import { editorManifest } from './editor/manifest'
+import { screencastManifest } from './screencast/manifest'
+import { screenshotManifest } from './screenshot/manifest'
+import { recorderManifest } from './recorder/manifest'
+import { logcatManifest } from './logcat/manifest'
 
 export function registerBuiltInApps() {
   appRegistry.register(finderManifest)
+  appRegistry.register(terminalManifest)
+  appRegistry.register(editorManifest)
+  appRegistry.register(screencastManifest)
+  appRegistry.register(screenshotManifest)
+  appRegistry.register(recorderManifest)
+  appRegistry.register(logcatManifest)
 }

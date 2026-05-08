@@ -56,6 +56,15 @@ export const deviceHub = {
     return transportManager.requestUsbDevice()
   },
 
+  /** 启动时自动恢复授权过的设备 */
+  async bootstrap() {
+    try {
+      await transportManager.autoReconnectAuthorized()
+    } catch (err) {
+      console.warn('[deviceHub] bootstrap', err)
+    }
+  },
+
   async disconnect(id: string) {
     await transportManager.disconnect(id)
   },

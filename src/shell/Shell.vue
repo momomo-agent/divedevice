@@ -33,8 +33,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     />
     <Desktop />
     <ChatPanel
-      v-if="chatPos === 'right' || chatPos === 'hidden'"
-      :position="chatPos"
+      v-if="chatPos === 'right'"
+      position="right"
       @update:position="chatPos = $event"
     />
     <ChatPanel
@@ -42,6 +42,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       position="float"
       @update:position="chatPos = $event"
     />
+    <button
+      v-if="chatPos === 'hidden'"
+      class="chat-fab"
+      title="唤起对话 (⌘J)"
+      @click="chatPos = previousPos"
+    >✶</button>
   </div>
 </template>
 
@@ -53,4 +59,20 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   overflow: hidden;
   background: var(--bg);
 }
+.chat-fab {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(99, 163, 255, 0.85);
+  color: white;
+  font-size: 22px;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  z-index: 9999;
+}
+.chat-fab:hover { transform: scale(1.05); }
 </style>
