@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { chat, agentAsk, agentState, agentSettings } from '@/services'
+import { chat, sendOrQueue, agentState, agentSettings } from '@/services'
 
 export type ChatPosition = 'left' | 'right' | 'float' | 'hidden'
 
@@ -11,6 +11,7 @@ const emit = defineEmits<{
 
 const input = ref('')
 const showSettings = ref(false)
+const showPending = ref(true)
 const streamRef = ref<HTMLDivElement | null>(null)
 
 function scrollBottom() {
@@ -22,9 +23,18 @@ function scrollBottom() {
 function onSend() {
   const text = input.value.trim()
   if (!text) return
-  input.value = ''
-  agentAsk(text).then(scrollBottom).catch(() => {})
+  const r = sendOrQueue(text)
+  if (r !== 'empty') input.value = ''
   scrollBottom()
+}
+
+function removePending(id: string) { chat.removePending(id) }
+function movePendingUp(id: string) { chat.movePendingUp(id) }
+function movePendingDown(id: string) { chat.movePendingDown(id) }
+function clearPending() { chat.clearPending() }
+function editPending(id: string, current: string) {
+  const next = window.prompt('编辑排队消息：', current)
+  if (next !== null && next.trim()) chat.updatePending(id, next.trim())
 }
 
 const floatStyle = computed(() =>
@@ -119,14 +129,37 @@ onBeforeUnmount(() => { stopWatching?.() })
     </div>
 
     <footer>
-      <textarea
-        v-model="input"
-        rows="3"
-        :placeholder="agentState.running ? '正在回复…' : '告诉 Agent 你想做什么…'"
-        :disabled="agentState.running"
-        @keydown.enter.exact.prevent="onSend"
-      />
-      <button class="send" :disabled="agentState.running" @click="onSend">发送</button>
+      <div v-if="chat.pending.length" class="pending">
+        <div class="pending-head">
+          <span>排队 {{ chat.pending.length }}</span>
+          <div class="grow" />
+          <button class="mini" @click="showPending = !showPending">{{ showPending ? '收起' : '展开' }}</button>
+          <button class="mini danger" @click="clearPending" title="清空队列">清空</button>
+        </div>
+        <ul v-if="showPending">
+          <li v-for="(p, i) in chat.pending" :key="p.id">
+            <span class="idx">{{ i + 1 }}</span>
+            <span class="text" :title="p.text" @click="editPending(p.id, p.text)">{{ p.text }}</span>
+            <div class="ops">
+              <button class="mini" :disabled="i === 0" @click="movePendingUp(p.id)" title="上移">↑</button>
+              <button class="mini" :disabled="i === chat.pending.length - 1" @click="movePendingDown(p.id)" title="下移">↓</button>
+              <button class="mini danger" @click="removePending(p.id)" title="删除">×</button>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <div class="input-row">
+        <textarea
+          v-model="input"
+          rows="3"
+          :placeholder="agentState.running ? '输入消息入排队… (Enter 发送)' : '告诉 Agent 你想做什么…'"
+          @keydown.enter.exact.prevent="onSend"
+        />
+        <button class="send" @click="onSend" :disabled="!input.trim()">
+          {{ agentState.running ? '排队' : '发送' }}
+        </button>
+      </div>
     </footer>
   </aside>
 </template>
@@ -294,9 +327,14 @@ footer {
   padding: 10px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   display: flex;
+  flex-direction: column;
   gap: 8px;
 }
-footer textarea {
+.input-row {
+  display: flex;
+  gap: 8px;
+}
+.input-row textarea {
   flex: 1;
   resize: none;
   background: var(--surface-3);
@@ -307,8 +345,73 @@ footer textarea {
   font-size: 13px;
   font-family: inherit;
 }
-footer textarea:focus { outline: none; border-color: rgba(99, 163, 255, 0.45); }
-footer textarea:disabled { opacity: 0.5; }
+.input-row textarea:focus { outline: none; border-color: rgba(99, 163, 255, 0.45); }
+
+/* pending 队列 */
+.pending {
+  background: var(--surface-3);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  max-height: 180px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.pending-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  font-size: 10.5px;
+  color: var(--fg-3);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(255, 255, 255, 0.025);
+}
+.pending-head .grow { flex: 1; }
+.pending ul {
+  list-style: none;
+  margin: 0; padding: 2px 0;
+  overflow: auto;
+}
+.pending li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 11.5px;
+}
+.pending li:hover { background: rgba(255, 255, 255, 0.03); }
+.pending .idx {
+  color: var(--fg-3);
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  width: 14px;
+  flex-shrink: 0;
+}
+.pending .text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.pending .text:hover { color: var(--fg-1); text-decoration: underline dotted; }
+.pending .ops { display: flex; gap: 2px; flex-shrink: 0; }
+.mini {
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+}
+.mini:not(:disabled):hover { background: rgba(255, 255, 255, 0.08); color: var(--fg-1); }
+.mini:disabled { opacity: 0.3; cursor: not-allowed; }
+.mini.danger:not(:disabled):hover { background: rgba(248, 113, 113, 0.2); color: #fca5a5; }
 .send {
   align-self: flex-end;
   background: rgba(99, 163, 255, 0.22);
@@ -319,6 +422,7 @@ footer textarea:disabled { opacity: 0.5; }
   font-size: 12px;
   cursor: pointer;
   height: 32px;
+  flex-shrink: 0;
 }
 .send:disabled { opacity: 0.4; cursor: not-allowed; }
 .send:hover:not(:disabled) { background: rgba(99, 163, 255, 0.35); }

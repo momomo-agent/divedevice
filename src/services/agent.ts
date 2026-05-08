@@ -104,6 +104,21 @@ function buildTools() {
   }))
 }
 
+/**
+ * 统一入口：空闲时直接走 agentAsk；running 时排进 pending 队列，
+ * agentAsk 的 finally 会自动 dequeue 继续跑。
+ */
+export function sendOrQueue(prompt: string): 'sent' | 'queued' | 'empty' {
+  const text = prompt.trim()
+  if (!text) return 'empty'
+  if (agentState.running) {
+    chat.enqueue(text)
+    return 'queued'
+  }
+  agentAsk(text).catch(() => {})
+  return 'sent'
+}
+
 export async function agentAsk(prompt: string): Promise<void> {
   if (agentState.running) return
   agentState.error = null
@@ -211,5 +226,11 @@ export async function agentAsk(prompt: string): Promise<void> {
     chat.push('system', `出错：${agentState.error}`)
   } finally {
     agentState.running = false
+    // 排队的下一条自动接着跑
+    const next = chat.dequeue()
+    if (next) {
+      // 不 await 避免递归栈不断叠；setTimeout 0 让出循环
+      setTimeout(() => { agentAsk(next.text).catch(() => {}) }, 0)
+    }
   }
 }
