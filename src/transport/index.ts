@@ -88,13 +88,38 @@ class TransportManager {
 
     const adb = new Adb(transport)
 
-    const shortSerial = device.serial.slice(-4) || device.serial
-    const model = transport.banner.model ?? transport.banner.product ?? 'Android'
+    const serial = device.serial
+    const shortSerial = serial.slice(-4) || serial
+    const bannerModel = transport.banner.model
+    const bannerProduct = transport.banner.product
+
+    // banner.model/product 在部分 ROM 上会回 serial 或为空，那样拿不到真正的机型名。
+    // 此时走 getprop 拿 ro.product.model → manufacturer → 一个未知回补。
+    let prettyModel = bannerModel && bannerModel !== serial ? bannerModel : ''
+    if (!prettyModel && bannerProduct && bannerProduct !== serial) prettyModel = bannerProduct
+    if (!prettyModel) {
+      try {
+        const m = (await adb.subprocess.noneProtocol.spawnWaitText(['getprop', 'ro.product.model'])).trim()
+        if (m && m !== serial) prettyModel = m
+      } catch {}
+    }
+    if (!prettyModel) {
+      try {
+        const brand = (await adb.subprocess.noneProtocol.spawnWaitText(['getprop', 'ro.product.manufacturer'])).trim()
+        if (brand && brand !== serial) prettyModel = brand
+      } catch {}
+    }
+    if (!prettyModel) prettyModel = 'Android'
+
+    const displayName = shortSerial && shortSerial !== prettyModel
+      ? `${prettyModel} (${shortSerial})`
+      : prettyModel
+
     const info: DeviceInfo = {
-      id: `usb:${device.serial}`,
-      serial: device.serial,
-      name: `${model} (${shortSerial})`,
-      model,
+      id: `usb:${serial}`,
+      serial,
+      name: displayName,
+      model: prettyModel,
       transport: 'usb',
       connected: true,
     }
