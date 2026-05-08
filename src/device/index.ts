@@ -37,6 +37,63 @@ export interface ExecResult {
   exitCode: number
 }
 
+export interface TopActivity {
+  packageName: string
+  activityName: string
+  pid?: number
+  displayId?: number
+}
+
+export interface ActivityTask {
+  taskId: number
+  topActivity?: string
+  origActivity?: string
+  realActivity?: string
+  numActivities?: number
+}
+
+export interface ProcessInfo {
+  user: string
+  pid: number
+  ppid: number
+  vsz: number
+  rss: number
+  name: string
+}
+
+export interface LayerInfo {
+  total: number
+  visible: number
+  layers: Array<{ name: string; visible: boolean; crop?: string; z?: number }>
+}
+
+export interface BatteryInfo {
+  level?: number
+  scale?: number
+  status?: string
+  health?: string
+  plugged?: string
+  temperature?: number
+  voltage?: number
+  technology?: string
+  present?: boolean
+  [k: string]: unknown
+}
+
+export interface NetworkInfo {
+  wifi: { ssid?: string; ip?: string; bssid?: string }
+  mobile: { operator?: string; type?: string }
+  ipAddrs: Array<{ iface: string; ipv4?: string; ipv6?: string }>
+}
+
+export interface CpuInfo {
+  load1?: number
+  load5?: number
+  load15?: number
+  cpuPercent?: number
+  cores?: number
+}
+
 export interface PackageInfo {
   packageName: string
   /** 应用名称（如 label）——能拿到再填 */
@@ -110,6 +167,36 @@ export interface DeviceAPI {
     /** 授予授权 */
     grant(pkg: string, permission: string): Promise<void>
     revoke(pkg: string, permission: string): Promise<void>
+  }
+
+  /** 系统 / 调试查询（dumpsys / 属性 / 进程） */
+  system: {
+    /** 属性读写 */
+    getProps(): Promise<Record<string, string>>
+    setProp(key: string, value: string): Promise<void>
+
+    /** 前台 activity 信息（resumed） */
+    topActivity(): Promise<TopActivity | null>
+    /** 所有 task stack */
+    tasks(): Promise<ActivityTask[]>
+    /** 进程列表（ps） */
+    processes(): Promise<ProcessInfo[]>
+    /** SurfaceFlinger layers */
+    layers(): Promise<LayerInfo>
+    /** gfxinfo 渲染统计 */
+    gfxinfo(pkg?: string): Promise<string>
+    /** meminfo 全局 */
+    meminfo(): Promise<string>
+    /** 电池信息 */
+    battery(): Promise<BatteryInfo>
+    /** 网络状态 */
+    network(): Promise<NetworkInfo>
+    /** CPU 负载 */
+    cpuinfo(): Promise<CpuInfo>
+    /** 当前 IME */
+    currentIme(): Promise<string | null>
+    /** kill 进程（需 root） */
+    killPid(pid: number): Promise<void>
   }
 
   logcat(filter?: string): Promise<SpawnedProcess>
@@ -369,6 +456,166 @@ class AdbDeviceAPI implements DeviceAPI {
     },
   }
 
+  // ---- system ----
+
+  system = {
+    getProps: async (): Promise<Record<string, string>> => {
+      const { stdout } = await this.shell.exec('getprop')
+      const out: Record<string, string> = {}
+      for (const line of stdout.split('\n')) {
+        const m = line.match(/^\[([^\]]+)\]:\s*\[([^\]]*)\]/)
+        if (m) out[m[1]] = m[2]
+      }
+      return out
+    },
+    setProp: async (key: string, value: string) => {
+      await this.shell.exec(`setprop ${shellQuote(key)} ${shellQuote(value)}`)
+    },
+
+    topActivity: async (): Promise<TopActivity | null> => {
+      const { stdout } = await this.shell.exec('dumpsys activity activities')
+      // mResumedActivity: ActivityRecord{abc u0 com.foo/.Main t123}
+      const m = stdout.match(/mResumedActivity:[^\n]*\{[^ ]+ u\d+ ([^ /]+)\/([^ }]+)/)
+        ?? stdout.match(/ResumedActivity:[^\n]*\{[^ ]+ u\d+ ([^ /]+)\/([^ }]+)/)
+      if (!m) return null
+      const packageName = m[1]
+      let activityName = m[2]
+      if (activityName.startsWith('.')) activityName = packageName + activityName
+      return { packageName, activityName }
+    },
+
+    tasks: async (): Promise<ActivityTask[]> => {
+      const { stdout } = await this.shell.exec('dumpsys activity recents')
+      const tasks: ActivityTask[] = []
+      const re = /Recent #\d+:[\s\S]*?(?=Recent #\d+:|$)/g
+      const blocks = stdout.match(re) ?? []
+      for (const blk of blocks) {
+        const id = blk.match(/\btaskId=(\d+)/)?.[1]
+        if (!id) continue
+        tasks.push({
+          taskId: Number(id),
+          topActivity: blk.match(/topActivity[=:]\s*[^ ]*\{[^ ]+ ([^ }]+)/)?.[1]
+            ?? blk.match(/topActivity[=:]\s*([^\s,]+)/)?.[1],
+          origActivity: blk.match(/origActivity[=:]\s*([^\s,]+)/)?.[1],
+          realActivity: blk.match(/realActivity[=:]\s*([^\s,]+)/)?.[1],
+          numActivities: Number(blk.match(/numActivities=(\d+)/)?.[1] ?? '0') || undefined,
+        })
+      }
+      return tasks
+    },
+
+    processes: async (): Promise<ProcessInfo[]> => {
+      const { stdout } = await this.shell.exec('ps -A -o USER,PID,PPID,VSZ,RSS,NAME')
+      const lines = stdout.split('\n').slice(1).filter(Boolean)
+      const procs: ProcessInfo[] = []
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/)
+        if (parts.length < 6) continue
+        procs.push({
+          user: parts[0],
+          pid: Number(parts[1]) || 0,
+          ppid: Number(parts[2]) || 0,
+          vsz: Number(parts[3]) || 0,
+          rss: Number(parts[4]) || 0,
+          name: parts.slice(5).join(' '),
+        })
+      }
+      return procs
+    },
+
+    layers: async (): Promise<LayerInfo> => {
+      const { stdout } = await this.shell.exec('dumpsys SurfaceFlinger --list')
+      const names = stdout.split('\n').map((l) => l.trim()).filter(Boolean)
+      // 默认 --list 不含 visibility，单购额外拉 dumpsys SurfaceFlinger 解析 visible
+      const { stdout: full } = await this.shell.exec('dumpsys SurfaceFlinger')
+      const visibleNames = new Set<string>()
+      // heuristic：section header 开头的 "+ XxxLayer (name)" 通常是活跃 layer
+      for (const line of full.split('\n')) {
+        const m = line.match(/^\s*\+\s*(?:BufferLayer|ColorLayer|ContainerLayer|EffectLayer|Layer)\s+\S+\s+\(([^)]+)\)/)
+        if (m) visibleNames.add(m[1])
+      }
+      return {
+        total: names.length,
+        visible: visibleNames.size,
+        layers: names.map((name) => ({ name, visible: visibleNames.has(name) })),
+      }
+    },
+
+    gfxinfo: async (pkg?: string): Promise<string> => {
+      const target = pkg ? shellQuote(pkg) : ''
+      const { stdout } = await this.shell.exec(`dumpsys gfxinfo ${target}`)
+      return stdout
+    },
+
+    meminfo: async (): Promise<string> => {
+      const { stdout } = await this.shell.exec('dumpsys meminfo')
+      return stdout
+    },
+
+    battery: async (): Promise<BatteryInfo> => {
+      const { stdout } = await this.shell.exec('dumpsys battery')
+      const get = (re: RegExp): string | undefined => stdout.match(re)?.[1]?.trim()
+      const info: BatteryInfo = {}
+      const level = get(/^\s*level:\s*(\d+)/m); if (level) info.level = Number(level)
+      const scale = get(/^\s*scale:\s*(\d+)/m); if (scale) info.scale = Number(scale)
+      info.status = mapBatteryStatus(get(/^\s*status:\s*(\d+)/m))
+      info.health = mapBatteryHealth(get(/^\s*health:\s*(\d+)/m))
+      info.plugged = mapBatteryPlugged(get(/^\s*plugged:\s*(-?\d+)/m))
+      const t = get(/^\s*temperature:\s*(\d+)/m); if (t) info.temperature = Number(t) / 10
+      const v = get(/^\s*voltage:\s*(\d+)/m); if (v) info.voltage = Number(v)
+      info.technology = get(/^\s*technology:\s*(.*)$/m)
+      const p = get(/^\s*present:\s*(true|false)/m); if (p) info.present = p === 'true'
+      return info
+    },
+
+    network: async (): Promise<NetworkInfo> => {
+      const [wifi, ip] = await Promise.all([
+        this.shell.exec('dumpsys wifi | head -n 60').catch(() => ({ stdout: '' })),
+        this.shell.exec('ip -o addr').catch(() => ({ stdout: '' })),
+      ])
+      const info: NetworkInfo = { wifi: {}, mobile: {}, ipAddrs: [] }
+      info.wifi.ssid = wifi.stdout.match(/mWifiInfo\s+SSID:\s*"?([^",\n]+)"?/)?.[1]
+        ?? wifi.stdout.match(/\bSSID:\s*"?([^",\n]+)"?/)?.[1]
+      // ip -o addr 解析
+      const byIface: Record<string, { ipv4?: string; ipv6?: string }> = {}
+      for (const line of ip.stdout.split('\n')) {
+        const m = line.match(/^\d+:\s+(\S+)\s+inet6?\s+([0-9a-f:.]+)/i)
+        if (!m) continue
+        const [, iface, addr] = m
+        if (!byIface[iface]) byIface[iface] = {}
+        if (addr.includes(':')) byIface[iface].ipv6 = addr.split('/')[0]
+        else byIface[iface].ipv4 = addr.split('/')[0]
+      }
+      info.ipAddrs = Object.entries(byIface).map(([iface, v]) => ({ iface, ...v }))
+      info.wifi.ip = byIface.wlan0?.ipv4
+      return info
+    },
+
+    cpuinfo: async (): Promise<CpuInfo> => {
+      const { stdout } = await this.shell.exec('cat /proc/loadavg; nproc')
+      const lines = stdout.trim().split('\n')
+      const info: CpuInfo = {}
+      if (lines[0]) {
+        const parts = lines[0].split(/\s+/)
+        if (parts[0]) info.load1 = Number(parts[0])
+        if (parts[1]) info.load5 = Number(parts[1])
+        if (parts[2]) info.load15 = Number(parts[2])
+      }
+      if (lines[1]) info.cores = Number(lines[1].trim()) || undefined
+      return info
+    },
+
+    currentIme: async (): Promise<string | null> => {
+      const { stdout } = await this.shell.exec('settings get secure default_input_method')
+      const ime = stdout.trim()
+      return ime && ime !== 'null' ? ime : null
+    },
+
+    killPid: async (pid: number) => {
+      await this.shell.exec(`kill ${pid}`)
+    },
+  }
+
   async logcat(filter?: string): Promise<SpawnedProcess> {
     const cmd = filter ? `logcat ${filter}` : 'logcat'
     return this.shell.spawn(cmd)
@@ -406,6 +653,27 @@ function parseDateMs(s: string | undefined): number | undefined {
   if (!s) return undefined
   const t = Date.parse(s)
   return Number.isNaN(t) ? undefined : t
+}
+
+function mapBatteryStatus(code: string | undefined): string | undefined {
+  if (!code) return undefined
+  return ({
+    '1': 'Unknown', '2': 'Charging', '3': 'Discharging',
+    '4': 'Not charging', '5': 'Full',
+  } as Record<string, string>)[code] ?? code
+}
+
+function mapBatteryHealth(code: string | undefined): string | undefined {
+  if (!code) return undefined
+  return ({
+    '1': 'Unknown', '2': 'Good', '3': 'Overheat', '4': 'Dead',
+    '5': 'Over voltage', '6': 'Unspecified failure', '7': 'Cold',
+  } as Record<string, string>)[code] ?? code
+}
+
+function mapBatteryPlugged(code: string | undefined): string | undefined {
+  if (!code) return undefined
+  return ({ '0': 'None', '1': 'AC', '2': 'USB', '4': 'Wireless' } as Record<string, string>)[code] ?? code
 }
 
 // ============ 工厂 + 注册表 ============
