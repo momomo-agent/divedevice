@@ -57,10 +57,30 @@ function stringifyErr(v: unknown): string {
   return String(v)
 }
 
-function buildHistory(): Array<{ role: string; content: string }> {
-  return chat.messages
-    .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .map((m) => ({ role: m.role, content: m.content }))
+function buildHistory(): Array<{ role: string; content: unknown }> {
+  // 带上 tool 轮次信息，避免模型次轮推理時完全看不到工具调用历史而幻觉。
+  // 约定：tool.meta.kind 为 'use' 或 'result'，配合 id/name/input/output 还原 Anthropic/OpenAI 通用的工具消息形状。
+  const out: Array<{ role: string; content: unknown }> = []
+  for (const m of chat.messages) {
+    if (m.role === 'user' || m.role === 'assistant') {
+      if (!m.content) continue // 空文本就丢，避免影响 history
+      out.push({ role: m.role, content: m.content })
+    } else if (m.role === 'tool' && m.meta) {
+      const kind = m.meta.kind
+      if (kind === 'use') {
+        out.push({
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: m.meta.id, name: m.meta.name, input: m.meta.input ?? {} }],
+        } as never)
+      } else if (kind === 'result') {
+        out.push({
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: m.meta.id, content: typeof m.meta.output === 'string' ? m.meta.output : JSON.stringify(m.meta.output ?? null) }],
+        } as never)
+      }
+    }
+  }
+  return out
 }
 
 function buildTools() {
@@ -71,8 +91,13 @@ function buildTools() {
     parameters: def.parameters,
     execute: async (input: Record<string, unknown>) => {
       try {
-        return await def.execute(input, { deviceId })
+        const r = await def.execute(input, { deviceId })
+        console.debug('[tool-wrapper]', def.name, 'returned:', r)
+        // undefined 和 void return 对下游反序列化不友好，正规化为一个结构体
+        if (r === undefined) return { ok: true }
+        return r
       } catch (err) {
+        console.debug('[tool-wrapper]', def.name, 'error:', err)
         return { error: (err as Error).message }
       }
     },
@@ -96,8 +121,12 @@ export async function agentAsk(prompt: string): Promise<void> {
 
   try {
     const api = await loadAgenticCore()
-    // 传历史时排除刚添加的 user 和 assistant 空壳
-    const history = buildHistory().slice(0, -1)
+    // agentic-core 会自己把 prompt 拼进 messages，我们 history 不要重复包含当前 user。
+    // buildHistory() 返回的是 chat.messages 全体，已经含刚推的 user，去掉 user 和空 assistant 尾巴。
+    let history = buildHistory()
+    // 去掉刚推的空 assistant 和 user prompt（agentic-core 会加回去）
+    while (history.length && history[history.length - 1].content === '') history.pop()
+    if (history.length && history[history.length - 1].content === prompt) history.pop()
 
     const iter = api.agenticAsk(prompt, {
       provider,
@@ -107,11 +136,16 @@ export async function agentAsk(prompt: string): Promise<void> {
       model,
       system: `${system}\n\n${desktopPromptBlock()}`,
       tools: buildTools(),
-      history: history.slice(0, -1),
+      history,
       stream: true,
     })
 
     for await (const event of iter) {
+      // DEBUG: 抓所有原始事件字段
+      try {
+        console.debug('[agent/event]', event.type, Object.keys(event), JSON.stringify(event).slice(0, 400))
+      } catch { console.debug('[agent/event]', event.type) }
+
       switch (event.type) {
         case 'text_delta':
           if (typeof event.text === 'string') assistantMsg.content += event.text
@@ -122,6 +156,8 @@ export async function agentAsk(prompt: string): Promise<void> {
           let inputStr: string
           try { inputStr = JSON.stringify(input) } catch { inputStr = String(input) }
           chat.push('tool', `→ ${event.name}(${inputStr})`, {
+            kind: 'use',
+            id: event.id,
             name: event.name,
             input: event.input,
           })
@@ -141,7 +177,10 @@ export async function agentAsk(prompt: string): Promise<void> {
             if (typeof text !== 'string') text = String(payload)
           }
           chat.push('tool', `← ${text.length > 400 ? text.slice(0, 400) + '…' : text}`, {
-            output: event.output,
+            kind: 'result',
+            id: event.id,
+            name: event.name,
+            output: payload,
           })
           break
         }
