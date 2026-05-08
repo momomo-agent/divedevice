@@ -78,6 +78,10 @@ onBeforeUnmount(() => { stopWatching?.() })
         <input v-model="agentSettings.baseUrl" placeholder="留空走官方端点" />
       </div>
       <div class="row">
+        <label>Proxy URL</label>
+        <input v-model="agentSettings.proxyUrl" placeholder="留空直连；如 https://proxy.momomo.dev/" />
+      </div>
+      <div class="row">
         <label>Model</label>
         <input v-model="agentSettings.model" />
       </div>
