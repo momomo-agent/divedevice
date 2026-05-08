@@ -93,21 +93,43 @@ class TransportManager {
     const bannerModel = transport.banner.model
     const bannerProduct = transport.banner.product
 
-    // banner.model/product 在部分 ROM 上会回 serial 或为空，那样拿不到真正的机型名。
-    // 此时走 getprop 拿 ro.product.model → manufacturer → 一个未知回补。
-    let prettyModel = bannerModel && bannerModel !== serial ? bannerModel : ''
-    if (!prettyModel && bannerProduct && bannerProduct !== serial) prettyModel = bannerProduct
+    // banner.model/product 在部分 ROM 上会回 serial（大小写差异/纯数字型号）或为空，
+    // 那样拿不到真正的机型名。此时走 getprop。
+    const looksLikeSerial = (s: string | undefined): boolean => {
+      if (!s) return true
+      if (s.toLowerCase() === serial.toLowerCase()) return true
+      // 纯大写字母+数字且 >= 8 位（典型小米/OPPO 的 serial 形状，如 24129PN74C）
+      if (/^[A-Z0-9]{8,}$/.test(s) && /\d/.test(s) && /[A-Z]/.test(s)) return true
+      return false
+    }
+
+    let prettyModel = !looksLikeSerial(bannerModel) ? bannerModel : ''
+    if (!prettyModel && !looksLikeSerial(bannerProduct)) prettyModel = bannerProduct
     if (!prettyModel) {
       try {
         const m = (await adb.subprocess.noneProtocol.spawnWaitText(['getprop', 'ro.product.model'])).trim()
-        if (m && m !== serial) prettyModel = m
+        if (m && !looksLikeSerial(m)) prettyModel = m
       } catch {}
     }
     if (!prettyModel) {
       try {
         const brand = (await adb.subprocess.noneProtocol.spawnWaitText(['getprop', 'ro.product.manufacturer'])).trim()
-        if (brand && brand !== serial) prettyModel = brand
+        if (brand && !looksLikeSerial(brand)) prettyModel = brand
       } catch {}
+    }
+    // 些 Redmi/小米 ro.product.model 就是 serial，试 ro.product.marketname / ro.vendor.oplus.market.name
+    if (!prettyModel) {
+      for (const key of [
+        'ro.product.marketname',
+        'ro.vendor.oplus.market.name',
+        'ro.product.odm.marketname',
+        'ro.product.vendor.marketname',
+      ]) {
+        try {
+          const m = (await adb.subprocess.noneProtocol.spawnWaitText(['getprop', key])).trim()
+          if (m && !looksLikeSerial(m)) { prettyModel = m; break }
+        } catch {}
+      }
     }
     if (!prettyModel) prettyModel = 'Android'
 
