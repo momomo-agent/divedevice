@@ -125,9 +125,19 @@ export interface DeviceAPI {
     read(path: string): Promise<Uint8Array>
     readText(path: string, encoding?: string): Promise<string>
     write(path: string, data: Uint8Array | string): Promise<void>
+    /** 分块写入，用于大文仸拖拽上传；返回可抹的 progress stream */
+    writeStream(path: string, size: number): Promise<{
+      write(chunk: Uint8Array): Promise<void>
+      close(): Promise<void>
+      abort(): Promise<void>
+    }>
     stat(path: string): Promise<FileEntry | null>
     mkdir(path: string, recursive?: boolean): Promise<void>
     rm(path: string, recursive?: boolean): Promise<void>
+    /** 重命名 / 移动（mv） */
+    rename(from: string, to: string): Promise<void>
+    /** 复制文件或目录（cp -a） */
+    copy(from: string, to: string): Promise<void>
   }
 
   shell: {
@@ -298,6 +308,37 @@ class AdbDeviceAPI implements DeviceAPI {
       }
     },
 
+    writeStream: async (path: string, _size: number) => {
+      const sync = await this.conn.adb.sync()
+      let controller!: ReadableStreamDefaultController<Uint8Array>
+      const source = new ReadableStream<Uint8Array>({
+        start(c) { controller = c },
+      })
+      // sync.write 返回的是 Promise（流关闭才 resolve），并行跑
+      const writePromise = sync.write({ filename: path, file: source })
+        .catch((err: unknown) => { throw err })
+      let closed = false
+      return {
+        async write(chunk: Uint8Array) {
+          controller.enqueue(chunk)
+        },
+        close: async () => {
+          if (closed) return
+          closed = true
+          controller.close()
+          await writePromise
+          await sync.dispose()
+        },
+        abort: async () => {
+          if (closed) return
+          closed = true
+          try { controller.error(new Error('aborted')) } catch { /* ignore */ }
+          try { await writePromise } catch { /* ignore */ }
+          await sync.dispose()
+        },
+      }
+    },
+
     stat: async (path: string): Promise<FileEntry | null> => {
       const sync = await this.conn.adb.sync()
       try {
@@ -325,6 +366,17 @@ class AdbDeviceAPI implements DeviceAPI {
     rm: async (path: string, recursive = false) => {
       const flag = recursive ? '-rf' : '-f'
       await this.shell.exec(`rm ${flag} ${shellQuote(path)}`)
+    },
+
+    rename: async (from: string, to: string) => {
+      const res = await this.shell.exec(`mv ${shellQuote(from)} ${shellQuote(to)}`)
+      if (res.exitCode !== 0) throw new Error(res.stderr || `mv failed (exit ${res.exitCode})`)
+    },
+
+    copy: async (from: string, to: string) => {
+      // -a 保留属性 + 递归；-T 避免在目标已存在时作为子目录
+      const res = await this.shell.exec(`cp -a ${shellQuote(from)} ${shellQuote(to)}`)
+      if (res.exitCode !== 0) throw new Error(res.stderr || `cp failed (exit ${res.exitCode})`)
     },
   }
 

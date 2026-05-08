@@ -6,7 +6,7 @@
  */
 import { ref, watch, computed, onBeforeUnmount } from 'vue'
 import { useDevice, useWindow, useEventbus, useAppController } from '@/composables'
-import { windowManager, lookupFileAssoc, isImageFile } from '@/services'
+import { windowManager, lookupFileAssoc, isImageFile, chat } from '@/services'
 import type { FileEntry } from '@/device'
 
 const { window: win } = useWindow()
@@ -119,6 +119,10 @@ useAppController({
       { name: 'setView', description: 'Change layout. payload: {view: "icons"|"list"|"columns"}' },
       { name: 'search', description: 'Filter current dir. payload: {query: string}' },
       { name: 'refresh', description: 'Reload current dir' },
+      { name: 'newFolder', description: 'Create a new folder in current dir (auto-named, enters rename mode)' },
+      { name: 'rename', description: 'Rename a file/dir. payload: {from: string, to: string}' },
+      { name: 'delete', description: 'Delete a path. payload: {path: string}' },
+      { name: 'download', description: 'Download a file/dir to user’s machine. payload: {path: string}' },
     ],
   }),
   async send(event, payload) {
@@ -146,6 +150,34 @@ useAppController({
       case 'refresh': {
         await load()
         return { ok: true, entryCount: entries.value.length }
+      }
+      case 'newFolder': {
+        await newFolder()
+        return { ok: true, path: selected.value }
+      }
+      case 'rename': {
+        const from = String(p.from ?? '')
+        const to = String(p.to ?? '')
+        if (!from || !to) throw new Error('rename requires payload.from + payload.to')
+        await device.value!.fs.rename(from, to)
+        await load()
+        return { ok: true, from, to }
+      }
+      case 'delete': {
+        const target = String(p.path ?? '')
+        if (!target) throw new Error('delete requires payload.path')
+        const st = await device.value!.fs.stat(target)
+        await device.value!.fs.rm(target, st?.isDir ?? false)
+        await load()
+        return { ok: true, deleted: target }
+      }
+      case 'download': {
+        const target = String(p.path ?? '')
+        if (!target) throw new Error('download requires payload.path')
+        const st = await device.value!.fs.stat(target)
+        if (!st) throw new Error('path not found')
+        await downloadEntry(st)
+        return { ok: true, path: target }
       }
       default: throw new Error(`Unknown finder event: ${event}`)
     }
@@ -273,6 +305,291 @@ function iconOf(e: FileEntry) {
   if (/\.(js|ts|tsx|jsx|py|rb|go|rs|java|kt|swift|c|cpp|h)$/i.test(e.name)) return '⌨'
   return '📄'
 }
+
+// ---- File operations: new folder / rename / delete / download / upload ----
+function joinPath(dir: string, name: string): string {
+  if (dir === '/') return `/${name}`
+  return `${dir.replace(/\/$/, '')}/${name}`
+}
+
+function suggestName(base: string): string {
+  // 汇入本目录已有的名字集合
+  const used = new Set(entries.value.map((e) => e.name))
+  if (!used.has(base)) return base
+  let i = 2
+  while (true) {
+    const cand = `${base} ${i}`
+    if (!used.has(cand)) return cand
+    i++
+    if (i > 1000) return `${base} ${Date.now()}`
+  }
+}
+
+const busy = ref<string | null>(null)
+async function withBusy<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  busy.value = label
+  try { return await fn() } finally { busy.value = null }
+}
+
+// New folder — 不弹原生 prompt，直接创建“新建文件夹”然后立刻进入重命名模式。
+async function newFolder() {
+  if (!device.value) return
+  const name = suggestName('新建文件夹')
+  const full = joinPath(path.value, name)
+  await withBusy(`创建 ${name}…`, async () => {
+    await device.value!.fs.mkdir(full, false)
+    await load()
+  })
+  selected.value = full
+  renamingPath.value = full
+  renamingValue.value = name
+}
+
+// Rename — inline edit
+const renamingPath = ref<string | null>(null)
+const renamingValue = ref('')
+async function commitRename() {
+  if (!renamingPath.value || !device.value) { cancelRename(); return }
+  const from = renamingPath.value
+  const newName = renamingValue.value.trim()
+  const oldName = from.split('/').pop()!
+  if (!newName || newName === oldName) { cancelRename(); return }
+  if (newName.includes('/')) { chat.push('system', '文件名不能包含 "/"'); cancelRename(); return }
+  const parent = from.substring(0, from.lastIndexOf('/')) || '/'
+  const to = joinPath(parent, newName)
+  await withBusy(`重命名 → ${newName}`, async () => {
+    await device.value!.fs.rename(from, to)
+    await load()
+  }).catch((err) => chat.push('system', `重命名失败: ${(err as Error).message}`))
+  renamingPath.value = null
+  selected.value = to
+}
+function cancelRename() {
+  renamingPath.value = null
+  renamingValue.value = ''
+}
+function startRename(e: FileEntry) {
+  renamingPath.value = e.path
+  renamingValue.value = e.name
+}
+
+// Delete
+async function deleteSelected() {
+  if (!selected.value || !device.value) return
+  const target = entries.value.find((e) => e.path === selected.value)
+  if (!target) return
+  if (!confirm(`确定删除 ${target.name}${target.isDir ? '（整个目录）' : ''}？`)) return
+  await withBusy(`删除 ${target.name}…`, async () => {
+    await device.value!.fs.rm(target.path, target.isDir)
+    await load()
+  }).catch((err) => chat.push('system', `删除失败: ${(err as Error).message}`))
+}
+
+// Download selected (or specific entry) to user's machine via <a download>
+async function downloadEntry(e: FileEntry) {
+  if (!device.value) return
+  if (e.isDir) {
+    // 目录：tar 打包流输出再存为 .tar
+    await withBusy(`打包 ${e.name}…`, async () => {
+      const proc = await device.value!.shell.spawn(`tar -cf - -C "${e.path.substring(0, e.path.lastIndexOf('/')) || '/'}" "${e.name}"`)
+      const chunks: Uint8Array[] = []
+      // @ts-expect-error stream compat
+      const reader = (proc.output as ReadableStream<Uint8Array>).getReader()
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        if (value) chunks.push(value)
+      }
+      let total = 0
+      for (const c of chunks) total += c.byteLength
+      const buf = new Uint8Array(total)
+      let off = 0
+      for (const c of chunks) { buf.set(c, off); off += c.byteLength }
+      triggerDownload(new Blob([buf], { type: 'application/x-tar' }), `${e.name}.tar`)
+    }).catch((err) => chat.push('system', `下载失败: ${(err as Error).message}`))
+  } else {
+    await withBusy(`下载 ${e.name}…`, async () => {
+      const bytes = await device.value!.fs.read(e.path)
+      triggerDownload(new Blob([bytes as BlobPart]), e.name)
+    }).catch((err) => chat.push('system', `下载失败: ${(err as Error).message}`))
+  }
+}
+function triggerDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+// ---- Upload via drag&drop or file picker ----
+interface Transfer {
+  id: number
+  name: string
+  total: number
+  sent: number
+  status: 'running' | 'done' | 'error'
+  error?: string
+}
+const transfers = ref<Transfer[]>([])
+let _tid = 0
+const dragHover = ref(false)
+
+function walkFileSystemEntry(entry: any, pathPrefix: string, out: Array<{ file: File; relPath: string }>): Promise<void> {
+  return new Promise((resolve) => {
+    if (entry.isFile) {
+      (entry as any).file((f: File) => {
+        out.push({ file: f, relPath: pathPrefix + f.name })
+        resolve()
+      }, () => resolve())
+    } else if (entry.isDirectory) {
+      const reader = (entry as any).createReader()
+      const readAll = (acc: any[] = []): Promise<any[]> => new Promise((res) => {
+        reader.readEntries((ents: any[]) => {
+          if (!ents.length) res(acc)
+          else readAll(acc.concat(ents)).then(res)
+        }, () => res(acc))
+      })
+      readAll().then(async (ents) => {
+        for (const child of ents) {
+          await walkFileSystemEntry(child, pathPrefix + entry.name + '/', out)
+        }
+        resolve()
+      })
+    } else { resolve() }
+  })
+}
+
+async function collectDropped(dt: DataTransfer): Promise<Array<{ file: File; relPath: string }>> {
+  const out: Array<{ file: File; relPath: string }> = []
+  const items = Array.from(dt.items || [])
+  if (items.some((it) => typeof (it as any).webkitGetAsEntry === 'function')) {
+    for (const it of items) {
+      if (it.kind !== 'file') continue
+      const entry = (it as any).webkitGetAsEntry?.()
+      if (!entry) continue
+      await walkFileSystemEntry(entry, '', out)
+    }
+    if (out.length) return out
+  }
+  // Fallback
+  for (const f of Array.from(dt.files || [])) {
+    out.push({ file: f, relPath: f.name })
+  }
+  return out
+}
+
+async function uploadFiles(files: Array<{ file: File; relPath: string }>) {
+  if (!device.value || !files.length) return
+  // 确保需要的子目录
+  const dirsToCreate = new Set<string>()
+  for (const f of files) {
+    const sub = f.relPath.substring(0, f.relPath.lastIndexOf('/'))
+    if (sub) dirsToCreate.add(joinPath(path.value, sub))
+  }
+  for (const d of dirsToCreate) {
+    try { await device.value!.fs.mkdir(d, true) } catch { /* ignore */ }
+  }
+  for (const { file, relPath } of files) {
+    const dest = joinPath(path.value, relPath)
+    const t: Transfer = { id: ++_tid, name: relPath, total: file.size, sent: 0, status: 'running' }
+    transfers.value.push(t)
+    try {
+      const ws = await device.value!.fs.writeStream(dest, file.size)
+      const reader = file.stream().getReader()
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        if (value) {
+          await ws.write(value)
+          t.sent += value.byteLength
+          transfers.value = [...transfers.value]
+        }
+      }
+      await ws.close()
+      t.status = 'done'
+    } catch (err) {
+      t.status = 'error'
+      t.error = (err as Error).message
+      chat.push('system', `上传失败 ${relPath}: ${t.error}`)
+    }
+    transfers.value = [...transfers.value]
+  }
+  await load()
+  // 3 秒后清掉已完成的
+  setTimeout(() => {
+    transfers.value = transfers.value.filter((x) => x.status === 'running')
+  }, 3000)
+}
+
+async function onDrop(ev: DragEvent) {
+  ev.preventDefault()
+  dragHover.value = false
+  if (!ev.dataTransfer || !device.value) return
+  const files = await collectDropped(ev.dataTransfer)
+  if (!files.length) return
+  await uploadFiles(files)
+}
+function onDragEnter(ev: DragEvent) {
+  if (!ev.dataTransfer?.types?.includes('Files')) return
+  ev.preventDefault()
+  dragHover.value = true
+}
+function onDragLeave(ev: DragEvent) {
+  // 只有离开容器本身时才真的绿灯
+  if (ev.currentTarget === ev.target) dragHover.value = false
+}
+function onDragOver(ev: DragEvent) {
+  if (!ev.dataTransfer?.types?.includes('Files')) return
+  ev.preventDefault()
+  ev.dataTransfer.dropEffect = 'copy'
+}
+
+// 点 toolbar 上传 button 走隐藏 input
+const fileInputRef = ref<HTMLInputElement | null>(null)
+async function onFileInput(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  if (!input.files?.length) return
+  const list: Array<{ file: File; relPath: string }> = []
+  for (const f of Array.from(input.files)) {
+    // 如果支持 webkitdirectory 会带相对路径
+    const rel = (f as any).webkitRelativePath && (f as any).webkitRelativePath.length
+      ? (f as any).webkitRelativePath
+      : f.name
+    list.push({ file: f, relPath: rel })
+  }
+  await uploadFiles(list)
+  input.value = ''
+}
+
+function fmtPct(t: Transfer) {
+  if (!t.total) return '0%'
+  return `${Math.floor((t.sent / t.total) * 100)}%`
+}
+
+// autofocus directive for rename input
+const vFocus = {
+  mounted(el: HTMLElement) {
+    const input = (el.tagName === 'INPUT' ? el : el.querySelector('input')) as HTMLInputElement | null
+    input?.focus()
+    input?.select()
+  },
+}
+
+// Context menu
+interface ContextMenu {
+  x: number
+  y: number
+  entry: FileEntry
+}
+const contextMenu = ref<ContextMenu | null>(null)
+function openContextMenu(ev: MouseEvent, e: FileEntry) {
+  contextMenu.value = { x: ev.clientX, y: ev.clientY, entry: e }
+}
+function closeContextMenu() { contextMenu.value = null }
 </script>
 
 <template>
@@ -296,6 +613,22 @@ function iconOf(e: FileEntry) {
         </template>
       </div>
       <input v-model="searchQ" class="search" placeholder="搜索当前目录…" />
+      <button class="icon-btn" @click="newFolder" title="新建文件夹 (N)">➕</button>
+      <button
+        class="icon-btn"
+        :disabled="!selected"
+        @click="() => { const e = entries.find(x => x.path === selected); if (e) startRename(e) }"
+        title="重命名 (F2)"
+      >✏️</button>
+      <button
+        class="icon-btn"
+        :disabled="!selected"
+        @click="() => { const e = entries.find(x => x.path === selected); if (e) downloadEntry(e) }"
+        title="下载到本地"
+      >⬇️</button>
+      <button class="icon-btn" @click="() => fileInputRef?.click()" title="上传文件">⬆️</button>
+      <button class="icon-btn" :disabled="!selected" @click="deleteSelected" title="删除 (Del)">🗑</button>
+      <input ref="fileInputRef" type="file" multiple style="display:none" @change="onFileInput" />
       <button class="icon-btn" @click="load" title="刷新">⟳</button>
     </header>
 
@@ -316,23 +649,45 @@ function iconOf(e: FileEntry) {
       </aside>
 
       <!-- ================= Main panel ================= -->
-      <main class="content">
+      <main
+        class="content"
+        :class="{ 'drag-hover': dragHover }"
+        @dragenter="onDragEnter"
+        @dragover="onDragOver"
+        @dragleave="onDragLeave"
+        @drop="onDrop"
+        @keydown.f2.prevent="() => { const e = entries.find(x => x.path === selected); if (e) startRename(e) }"
+        @keydown.delete.prevent="deleteSelected"
+        tabindex="0"
+      >
         <div v-if="error" class="error">{{ error }}</div>
         <div v-else-if="loading && view !== 'columns'" class="center">加载中…</div>
 
         <!-- Icons -->
         <div v-else-if="view === 'icons'" class="icons" @click.self="selected = null">
-          <button
+          <div
             v-for="e in visible"
             :key="e.path"
             class="tile"
             :class="{ selected: selected === e.path }"
+            tabindex="0"
             @click.stop="selected = e.path"
             @dblclick="onEnter(e)"
+            @contextmenu.prevent="(ev) => { selected = e.path; openContextMenu(ev, e) }"
           >
             <div class="tile-icon">{{ iconOf(e) }}</div>
-            <div class="tile-name">{{ e.name }}</div>
-          </button>
+            <input
+              v-if="renamingPath === e.path"
+              class="rename-input tile-rename"
+              v-model="renamingValue"
+              v-focus
+              @keydown.enter.prevent="commitRename"
+              @keydown.escape.prevent="cancelRename"
+              @blur="commitRename"
+              @click.stop
+            />
+            <div v-else class="tile-name">{{ e.name }}</div>
+          </div>
           <div v-if="!visible.length" class="center muted">空目录</div>
         </div>
 
@@ -350,10 +705,21 @@ function iconOf(e: FileEntry) {
             :class="{ selected: selected === e.path }"
             @click="selected = e.path"
             @dblclick="onEnter(e)"
+            @contextmenu.prevent="(ev) => { selected = e.path; openContextMenu(ev, e) }"
           >
             <div class="col name">
               <span class="icon">{{ iconOf(e) }}</span>
-              <span class="label">{{ e.name }}</span>
+              <input
+                v-if="renamingPath === e.path"
+                class="rename-input"
+                v-model="renamingValue"
+                v-focus
+                @keydown.enter.prevent="commitRename"
+                @keydown.escape.prevent="cancelRename"
+                @blur="commitRename"
+                @click.stop
+              />
+              <span v-else class="label">{{ e.name }}</span>
             </div>
             <div class="col size">{{ e.isDir ? '—' : fmtSize(e.size) }}</div>
             <div class="col mtime">{{ fmtTime(e.mtime) }}</div>
@@ -382,9 +748,47 @@ function iconOf(e: FileEntry) {
       </main>
     </div>
 
+    <!-- ================= Transfer progress ================= -->
+    <div v-if="transfers.length" class="transfers">
+      <div v-for="t in transfers" :key="t.id" class="xfer" :class="t.status">
+        <div class="xfer-head">
+          <span class="xfer-name" :title="t.name">{{ t.name }}</span>
+          <span class="xfer-pct">
+            <template v-if="t.status === 'running'">{{ fmtPct(t) }}</template>
+            <template v-else-if="t.status === 'done'">✓</template>
+            <template v-else>✗ {{ t.error }}</template>
+          </span>
+        </div>
+        <div class="xfer-bar">
+          <div class="xfer-fill" :style="{ width: t.total ? ((t.sent / t.total) * 100) + '%' : '100%' }" />
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= Drop overlay ================= -->
+    <div v-if="dragHover" class="drop-overlay">
+      <div class="drop-box">⬇ 松手上传到 <b>{{ path }}</b></div>
+    </div>
+
+    <!-- ================= Context menu ================= -->
+    <div
+      v-if="contextMenu"
+      class="ctx-menu"
+      :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }"
+      @click.stop
+    >
+      <button @click="onEnter(contextMenu.entry); closeContextMenu()">打开</button>
+      <button @click="startRename(contextMenu.entry); closeContextMenu()">重命名</button>
+      <button @click="downloadEntry(contextMenu.entry); closeContextMenu()">下载到本地</button>
+      <div class="ctx-sep"></div>
+      <button class="danger" @click="selected = contextMenu.entry.path; deleteSelected(); closeContextMenu()">删除</button>
+    </div>
+    <div v-if="contextMenu" class="ctx-backdrop" @click="closeContextMenu" @contextmenu.prevent="closeContextMenu" />
+
     <!-- ================= Status bar ================= -->
     <footer class="statusbar">
       <span>{{ visible.length }} 项</span>
+      <span v-if="busy" class="busy">{{ busy }}</span>
       <span v-if="selected" class="sel">{{ selected.split('/').pop() }}</span>
     </footer>
 
@@ -661,4 +1065,119 @@ function iconOf(e: FileEntry) {
   font-size: 12px;
   backdrop-filter: blur(10px);
 }
+
+/* ---------- Drag & drop ---------- */
+.content {
+  position: relative;
+  outline: none;
+}
+.content.drag-hover::after {
+  content: '';
+  position: absolute; inset: 8px;
+  border: 2px dashed rgba(99, 163, 255, 0.7);
+  border-radius: 12px;
+  pointer-events: none;
+  background: rgba(99, 163, 255, 0.06);
+}
+.drop-overlay {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+  z-index: 20;
+}
+.drop-box {
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(8px);
+  padding: 16px 24px;
+  border-radius: 10px;
+  color: #fff;
+  font-size: 14px;
+  border: 1px solid rgba(99, 163, 255, 0.4);
+}
+.drop-box b { color: #63a3ff; font-family: ui-monospace, 'SF Mono', monospace; font-weight: 500; }
+
+/* ---------- Transfer panel ---------- */
+.transfers {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border-top: 1px solid rgba(255,255,255,0.06);
+  max-height: 160px;
+  overflow-y: auto;
+}
+.xfer { display: flex; flex-direction: column; gap: 3px; font-size: 11px; }
+.xfer-head { display: flex; justify-content: space-between; gap: 8px; }
+.xfer-name {
+  color: var(--fg-2);
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  font-family: ui-monospace, 'SF Mono', monospace;
+}
+.xfer-pct { color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.xfer.done .xfer-pct { color: #5eead4; }
+.xfer.error .xfer-pct { color: #f87171; }
+.xfer-bar {
+  height: 3px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.xfer-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #63a3ff, #5eead4);
+  transition: width 0.15s ease;
+}
+.xfer.done .xfer-fill { background: #5eead4; }
+.xfer.error .xfer-fill { background: #f87171; }
+
+/* ---------- Rename inline input ---------- */
+.rename-input {
+  background: var(--surface-1);
+  color: var(--fg-1);
+  border: 1px solid #63a3ff;
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  min-width: 0;
+  width: 100%;
+}
+.tile-rename {
+  font-size: 11px;
+  text-align: center;
+  max-width: 90%;
+}
+
+/* ---------- Context menu ---------- */
+.ctx-backdrop {
+  position: fixed; inset: 0;
+  z-index: 50;
+}
+.ctx-menu {
+  position: fixed;
+  z-index: 51;
+  min-width: 160px;
+  background: var(--surface-2);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  display: flex; flex-direction: column;
+}
+.ctx-menu button {
+  background: transparent;
+  border: none;
+  color: var(--fg-1);
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ctx-menu button:hover { background: rgba(99, 163, 255, 0.15); }
+.ctx-menu button.danger { color: #f87171; }
+.ctx-menu button.danger:hover { background: rgba(248, 113, 113, 0.15); }
+.ctx-sep { height: 1px; background: rgba(255,255,255,0.08); margin: 3px 4px; }
+
+.statusbar .busy { color: #63a3ff; font-size: 11px; }
 </style>
