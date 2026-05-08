@@ -5,7 +5,7 @@ import { useDevice } from '@/composables'
 const device = useDevice()
 const status = ref('空闲')
 const recording = ref(false)
-const fps = ref(8)
+const fps = ref(60)
 const elapsed = ref(0)
 const lastBlobUrl = ref<string | null>(null)
 
@@ -113,7 +113,7 @@ onBeforeUnmount(() => {
       <button v-else class="danger" @click="stop">■ 停止</button>
       <span class="fps">
         FPS:
-        <input type="range" min="2" max="15" v-model.number="fps" :disabled="recording" />
+        <input type="range" min="2" max="60" v-model.number="fps" :disabled="recording" />
         <span>{{ fps }}</span>
       </span>
       <span v-if="recording" class="timer">{{ fmt(elapsed) }}</span>

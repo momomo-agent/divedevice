@@ -8,7 +8,7 @@ const device = useDevice()
 const imgRef = ref<HTMLImageElement | null>(null)
 const wrapRef = ref<HTMLDivElement | null>(null)
 const status = ref('未启动')
-const fps = ref(5)
+const fps = ref(60)
 const playing = ref(false)
 const deviceSize = ref<{ w: number; h: number } | null>(null)
 
@@ -148,7 +148,7 @@ watch(() => win.value.deviceId, async () => {
       <button @click="captureOnce">📸 刷新</button>
       <span class="fps">
         FPS:
-        <input type="range" min="1" max="15" v-model.number="fps" />
+        <input type="range" min="1" max="60" v-model.number="fps" />
         <span>{{ fps }}</span>
       </span>
       <span class="status">{{ status }}</span>
