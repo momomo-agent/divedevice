@@ -117,6 +117,62 @@ export interface PackageInfo {
   enabled?: boolean
 }
 
+export type SettingsNamespace = 'system' | 'secure' | 'global'
+
+export interface ForwardSpec {
+  local: string   // 如 'tcp:6100'
+  remote: string  // 如 'tcp:7000' / 'localabstract:foo' / 'jdwp:1234'
+}
+
+export interface InstallOptions {
+  /** -r 覆盖安装 */
+  replace?: boolean
+  /** -d 允许降级 */
+  downgrade?: boolean
+  /** -t 允许测试 apk */
+  test?: boolean
+  /** -g 授予全部 runtime 权限 */
+  grantAll?: boolean
+  /** --user <id> */
+  user?: number
+  /** 额外标志 */
+  extra?: string[]
+}
+
+export interface IntentSpec {
+  /** -a ACTION */
+  action?: string
+  /** -d DATA_URI */
+  data?: string
+  /** -t MIME */
+  mime?: string
+  /** -c CATEGORY（可多） */
+  categories?: string[]
+  /** 目标 pkg/Component */
+  component?: string  // 'pkg/.Activity' or 'pkg/full.Activity'
+  /** 包名 */
+  pkg?: string
+  /** --es / --ei / --ez / --el / --ef / --eu key=value */
+  extras?: Record<string, string | number | boolean | { type: 'uri' | 'string' | 'int' | 'long' | 'float' | 'bool'; value: string | number | boolean }>
+  /** -f FLAG（十进制 int，多个 通过 |） */
+  flags?: number
+  /** 原始更多参数（不解析） */
+  raw?: string[]
+}
+
+export interface LogcatOptions {
+  /** priority filter tag：Tag:V|D|I|W|E|F|S，多个用数组；或直接传 filterSpec 字符串 */
+  filters?: string[]
+  /** 只拉某个 pid */
+  pid?: number
+  /** 日志 buffer：main/system/crash/events/radio/all */
+  buffer?: 'main' | 'system' | 'crash' | 'events' | 'radio' | 'all' | string
+  /** 格式：brief/process/tag/thread/time/threadtime/long */
+  format?: string
+  /** 只拉最后 N 行后退出 */
+  tail?: number
+}
+
 export interface DeviceAPI {
   readonly id: string
 
@@ -145,8 +201,19 @@ export interface DeviceAPI {
   }
 
   shell: {
+    /**
+     * 一次性运行 shell 命令并等它退出。stdout/stderr/exitCode 一起返。
+     * 默认使用 shell v2 protocol；老设备 fallback v1。
+     */
     exec(cmd: string): Promise<ExecResult>
+    /** 启动一个 long-running process，返 stdin/stdout/stderr/exit/kill */
     spawn(cmd: string): Promise<SpawnedProcess>
+    /** 换一个顺手的 run 形式：只拿 stdout。失败就抛，不用手动查 exitCode。 */
+    run(cmd: string): Promise<string>
+    /** 执行并反序列化为 JSON（stdout trim + parse）。失败抛。 */
+    json<T = unknown>(cmd: string): Promise<T>
+    /** su -c wrapper，有 root 用。不能 root 设备会抛。 */
+    su(cmd: string): Promise<ExecResult>
   }
 
   input: {
@@ -154,6 +221,14 @@ export interface DeviceAPI {
     swipe(x1: number, y1: number, x2: number, y2: number, durationMs?: number): Promise<void>
     text(s: string): Promise<void>
     key(keycode: number | string): Promise<void>
+    /** 长按 */
+    longPress(x: number, y: number, durationMs?: number): Promise<void>
+    /** 连续按键（例如导航几次倒退） */
+    keys(codes: Array<number | string>, intervalMs?: number): Promise<void>
+    /** sendevent raw event（高级） */
+    sendevent(device: string, type: number, code: number, value: number): Promise<void>
+    /** 获取所有输入设备 */
+    devices(): Promise<Array<{ path: string; name: string }>>
   }
 
   screen: {
@@ -168,11 +243,30 @@ export interface DeviceAPI {
       blueOffset: number; blueLength: number
       alphaOffset: number; alphaLength: number
     }>
+    /** 屏幕录制，返回可关闭的 session；size 如 '720x1280'，rate bitrate kbit/s */
+    record(opts?: { size?: string; bitRate?: number; timeLimitSec?: number; remotePath?: string }): Promise<{
+      /** 设备上的录制路径（默认 /sdcard/screenrecord-<ts>.mp4） */
+      path: string
+      stop(): Promise<void>
+      /** 停后从设备拉回为 Uint8Array */
+      pull(): Promise<Uint8Array>
+    }>
+    /** 显示开关 */
+    wakeUp(): Promise<void>
+    sleep(): Promise<void>
+    /** 当前亮度 0-100 */
+    getBrightness(): Promise<number | null>
+    setBrightness(percent: number): Promise<void>
+    /** 旋转 0/90/180/270 */
+    setRotation(degrees: 0 | 90 | 180 | 270): Promise<void>
+    /** 延迟灭屏时长（毫秒）读与写 */
+    getOffTimeout(): Promise<number>
+    setOffTimeout(ms: number): Promise<void>
   }
 
   app: {
     /** 包名数组（含 system apps） */
-    list(opts?: { system?: boolean; thirdParty?: boolean }): Promise<string[]>
+    list(opts?: { system?: boolean; thirdParty?: boolean; user?: number }): Promise<string[]>
     /** 包名 + 版本/installer/名称 等元信息 */
     info(pkg: string): Promise<PackageInfo | null>
     /** 批量拉元信息（并发控制） */
@@ -191,6 +285,27 @@ export interface DeviceAPI {
     /** 授予授权 */
     grant(pkg: string, permission: string): Promise<void>
     revoke(pkg: string, permission: string): Promise<void>
+    /** 安装 apk。支持 Uint8Array/Blob/path 三种输入；后者走设备上已在的路径直接 pm install */
+    install(source: Uint8Array | Blob | { devicePath: string }, opts?: InstallOptions): Promise<void>
+    /** split APKs（install-multiple） */
+    installMulti(sources: Array<Uint8Array | Blob | { devicePath: string }>, opts?: InstallOptions): Promise<void>
+    /** 某包当前 permission 状态 */
+    permissions(pkg: string): Promise<Array<{ name: string; granted: boolean }>>
+    /** 某包的 activities / services / receivers / providers 列表 */
+    components(pkg: string): Promise<{
+      activities: string[]
+      services: string[]
+      receivers: string[]
+      providers: string[]
+    }>
+    /** 应用默认 launch intent 组件（方便用于 am start） */
+    launcherComponent(pkg: string): Promise<string | null>
+    /** 解析与某个 intent 匹配的组件（pm resolve） */
+    resolve(intent: IntentSpec): Promise<string[]>
+    /** 清掉应用 cache（不抹 data） */
+    trimCache(pkg: string): Promise<void>
+    /** pm path <pkg>：查 apk 路径（方便 pull） */
+    apkPaths(pkg: string): Promise<string[]>
   }
 
   /** 系统 / 调试查询（dumpsys / 属性 / 进程） */
@@ -223,9 +338,228 @@ export interface DeviceAPI {
     currentIme(): Promise<string | null>
     /** kill 进程（需 root） */
     killPid(pid: number): Promise<void>
+
+    /** 审计 dumpsys service 列表 */
+    services(): Promise<string[]>
+    /** dumpsys <service> 原文 */
+    dumpsys(service: string, args?: string[]): Promise<string>
+    /** 执行 logcat（可过滤），返 spawned process */
+    logcat(opts?: LogcatOptions | string): Promise<SpawnedProcess>
+    /** getevent raw event stream */
+    getevent(devicePath?: string): Promise<SpawnedProcess>
+    /** 设备型号/SN/abi/SDK 通用快查 */
+    summary(): Promise<{
+      model?: string; brand?: string; manufacturer?: string; serial?: string
+      sdk?: number; androidVersion?: string; abis?: string[]; density?: number
+      displaySize?: { width: number; height: number }
+      bootId?: string; uptime?: number
+    }>
+    /** 上电时长 uptime 秒 */
+    uptime(): Promise<number>
   }
 
-  logcat(filter?: string): Promise<SpawnedProcess>
+  /** am 系列。intent 组合器 + 常见 shortcut */
+  am: {
+    /** am start -n pkg/.Activity + intent */
+    start(intent: IntentSpec, opts?: { waitForLaunch?: boolean; user?: number }): Promise<ExecResult>
+    /** am startservice */
+    startService(intent: IntentSpec): Promise<ExecResult>
+    /** am broadcast */
+    broadcast(intent: IntentSpec): Promise<ExecResult>
+    /** am kill / kill-all，支持包名 */
+    kill(pkg: string): Promise<void>
+    killAll(): Promise<void>
+    /** am force-stop */
+    forceStop(pkg: string): Promise<void>
+    /** am crash 制造崩溃 */
+    crash(pkg: string): Promise<void>
+    /** am to-uri（绝大多时候用不到，保留） */
+    toUri(intent: IntentSpec): Promise<string>
+    /** am set-standby-bucket */
+    setStandby(pkg: string, bucket: 'active' | 'working_set' | 'frequent' | 'rare' | 'restricted'): Promise<void>
+    /** am monitor 监听 crash/anr（long-running） */
+    monitor(): Promise<SpawnedProcess>
+  }
+
+  /** pm 系列。与 app 不重复的 low-level 操作 */
+  pm: {
+    /** pm list features */
+    features(): Promise<string[]>
+    /** pm list libraries */
+    libraries(): Promise<string[]>
+    /** pm list instrumentation */
+    instrumentations(): Promise<Array<{ target: string; component: string }>>
+    /** pm list users */
+    users(): Promise<Array<{ id: number; name: string; flags: string }>>
+    /** pm get-max-users */
+    maxUsers(): Promise<number>
+    /** pm path <pkg>（第一个 apk） */
+    path(pkg: string): Promise<string | null>
+    /** pm dump <pkg> 原文 */
+    dump(pkg: string): Promise<string>
+  }
+
+  /** settings system|secure|global 读写 */
+  settings: {
+    get(ns: SettingsNamespace, key: string): Promise<string | null>
+    put(ns: SettingsNamespace, key: string, value: string): Promise<void>
+    delete(ns: SettingsNamespace, key: string): Promise<void>
+    list(ns: SettingsNamespace): Promise<Record<string, string>>
+  }
+
+  /** getprop / setprop 单独托管 */
+  prop: {
+    get(key: string): Promise<string | null>
+    set(key: string, value: string): Promise<void>
+    all(): Promise<Record<string, string>>
+  }
+
+  /** wm: WindowManager */
+  wm: {
+    size(): Promise<{ width: number; height: number; override?: { width: number; height: number } }>
+    setSize(width: number, height: number): Promise<void>
+    resetSize(): Promise<void>
+    density(): Promise<{ physical: number; override?: number }>
+    setDensity(dpi: number): Promise<void>
+    resetDensity(): Promise<void>
+    overscan(left: number, top: number, right: number, bottom: number): Promise<void>
+    resetOverscan(): Promise<void>
+    /** wm user-rotation lock/unlock */
+    setUserRotation(mode: 'lock' | 'free', degrees?: 0 | 1 | 2 | 3): Promise<void>
+  }
+
+  /** content provider CRUD */
+  content: {
+    query(uri: string, opts?: { projection?: string[]; where?: string; sort?: string; user?: number }): Promise<string>
+    insert(uri: string, values: Record<string, string | number | boolean | null>, opts?: { user?: number }): Promise<string>
+    update(uri: string, values: Record<string, string | number | boolean | null>, opts?: { where?: string; user?: number }): Promise<string>
+    delete(uri: string, opts?: { where?: string; user?: number }): Promise<string>
+    call(uri: string, method: string, arg?: string, extras?: Record<string, string | number | boolean>): Promise<string>
+  }
+
+  /** svc: 系统服务开关（wifi / data / bluetooth / usb / nfc 等） */
+  svc: {
+    wifi(on: boolean): Promise<void>
+    data(on: boolean): Promise<void>
+    bluetooth(on: boolean): Promise<void>
+    nfc(on: boolean): Promise<void>
+    /** svc power stayon true|usb|ac|wireless|false */
+    stayOn(mode: boolean | 'usb' | 'ac' | 'wireless'): Promise<void>
+    /** svc power reboot [mode] */
+    reboot(mode?: 'recovery' | 'bootloader' | 'sideload' | 'fastboot'): Promise<void>
+  }
+
+  /** 网络相关：socket connect / reverse / 接口 */
+  net: {
+    /**
+     * 打开一个 ADB socket，等价于 `adb forward` 动态版本。
+     * WebUSB 宅景下不需要 forward list/add：每个 socket 本来就是直接对 device 开。
+     */
+    connect(service: string): Promise<{
+      readable: RS<Uint8Array>
+      writable: WS<Uint8Array>
+      close(): Promise<void>
+    }>
+    /** 现有 reverse tunnel 列表 */
+    reverseList(): Promise<Array<{ local: string; remote: string }>>
+    /**
+     * 添加 reverse tunnel：device 上某 port 连入时，回调 handler，
+     * handler 拿到的是一个类流的 socket 对象。
+     */
+    reverse(deviceAddress: string, handler: (socket: {
+      readable: RS<Uint8Array>
+      writable: WS<Uint8Array>
+      close(): Promise<void>
+    }) => void | Promise<void>, localAddress?: string): Promise<string>
+    reverseRemove(deviceAddress: string): Promise<void>
+    reverseRemoveAll(): Promise<void>
+    /** ifconfig / ip link 打包：接口列表 */
+    interfaces(): Promise<Array<{ name: string; ipv4?: string; ipv6?: string; mac?: string; mtu?: number; up: boolean }>>
+    /** ping */
+    ping(host: string, count?: number): Promise<{ transmitted: number; received: number; avgMs?: number; raw: string }>
+    /** netstat */
+    netstat(flags?: string): Promise<string>
+  }
+
+  /** 电源 / 结屏 等 */
+  power: {
+    /** 重启（如 mode 传 bootloader/recovery） */
+    reboot(mode?: 'recovery' | 'bootloader' | 'sideload' | 'fastboot'): Promise<void>
+    /** 关机 */
+    shutdown(): Promise<void>
+    /** 锁屏 */
+    lock(): Promise<void>
+    /** 唪醒 */
+    wake(): Promise<void>
+    /** 是否交流充电 */
+    isInteractive(): Promise<boolean>
+    /** 设备打开充电模拟 */
+    setCharging(plugged: boolean): Promise<void>
+    /** 电池模拟 reset */
+    resetBattery(): Promise<void>
+  }
+
+  /** logcat 单独接口（精细版本） */
+  log: {
+    spawn(opts?: LogcatOptions): Promise<SpawnedProcess>
+    /** 仅取最后 N 行，不常驻 */
+    tail(opts?: LogcatOptions & { lines?: number }): Promise<string>
+    /** 清空日志 buffer */
+    clear(): Promise<void>
+    /** buffer 治理：查/设 size */
+    bufferSize(kb?: number): Promise<string>
+  }
+
+  /** 多媒体测试便捷 */
+  media: {
+    volumeUp(): Promise<void>
+    volumeDown(): Promise<void>
+    mute(): Promise<void>
+    play(): Promise<void>
+    pause(): Promise<void>
+    next(): Promise<void>
+    prev(): Promise<void>
+    setMediaVolume(stream: 'ring' | 'music' | 'alarm' | 'voice_call' | 'notification' | 'system', value: number): Promise<void>
+  }
+
+  /**
+   * 逃生舱 / 扩展点：业务层想这个封装没盖到的能力，
+   * 拿到原生 connection、原生 adb、动态 socket / sync 也能自己来。
+   * 不要为“只为了快”绕过封装 —— 只在真的缺能力时用；下一次应该回流到封装层。
+   */
+  raw: {
+    /** 工原生 transport connection（含 DeviceInfo） */
+    readonly connection: AdbConnection
+    /** @yume-chan/adb 原生对象 */
+    readonly adb: AdbConnection['adb']
+    /** 打开一个任意 ADB socket（service 如 'shell:cat /proc/meminfo' / 'tcp:9999'） */
+    createSocket(service: string): Promise<{
+      readable: RS<Uint8Array>
+      writable: WS<Uint8Array>
+      close(): Promise<void>
+    }>
+    /** 直接开 sync session（调用完一定要 dispose） */
+    openSync(): Promise<{
+      read(path: string): RS<Uint8Array>
+      write(args: { filename: string; file: RS<Uint8Array>; mode?: number; mtime?: number }): Promise<void>
+      opendir(path: string): AsyncIterable<unknown>
+      lstat(path: string): Promise<unknown>
+      dispose(): Promise<void>
+    }>
+  }
+
+  /**
+   * 添加自定义命名空间 / 自定义方法。返回注入的对象；下次 `device.<name>` 即可用。
+   * 例子：
+   *   device.extend('scrcpy', (d) => ({
+   *     start: () => d.shell.spawn('scrcpy ...'),
+   *   }))
+   *   await device.scrcpy.start()
+   */
+  extend<T extends object>(name: string, factory: (device: DeviceAPI) => T): T
+
+  /** 历史兼容 shortcut：等价于 `log.spawn()` */
+  logcat(filter?: string | LogcatOptions): Promise<SpawnedProcess>
 }
 
 // ============ 实现：基于 adb connection ============
@@ -450,6 +784,25 @@ class AdbDeviceAPI implements DeviceAPI {
         kill: async () => { await proc.kill() },
       }
     },
+
+    run: async (cmd: string): Promise<string> => {
+      const { stdout, stderr, exitCode } = await this.shell.exec(cmd)
+      if (exitCode !== 0) throw new Error(`[$${exitCode}] ${cmd}\n${stderr || stdout}`)
+      return stdout
+    },
+
+    json: async <T = unknown>(cmd: string): Promise<T> => {
+      const text = await this.shell.run(cmd)
+      return JSON.parse(text.trim()) as T
+    },
+
+    su: async (cmd: string): Promise<ExecResult> => {
+      const { stdout, stderr, exitCode } = await this.shell.exec(`su -c ${shellQuote(cmd)}`)
+      if (/inaccessible or not found|Permission denied|su: not found/i.test(stderr + stdout)) {
+        throw new Error('设备不支持 su / 未 root')
+      }
+      return { stdout, stderr, exitCode }
+    },
   }
 
   // ---- input ----
@@ -467,6 +820,30 @@ class AdbDeviceAPI implements DeviceAPI {
     },
     key: async (keycode: number | string) => {
       await this.shell.exec(`input keyevent ${keycode}`)
+    },
+    longPress: async (x: number, y: number, durationMs = 600) => {
+      await this.shell.exec(`input swipe ${x} ${y} ${x} ${y} ${durationMs}`)
+    },
+    keys: async (codes: Array<number | string>, intervalMs = 80) => {
+      for (let i = 0; i < codes.length; i++) {
+        await this.shell.exec(`input keyevent ${codes[i]}`)
+        if (i < codes.length - 1 && intervalMs > 0) {
+          await new Promise((r) => setTimeout(r, intervalMs))
+        }
+      }
+    },
+    sendevent: async (device: string, type: number, code: number, value: number) => {
+      await this.shell.exec(`sendevent ${shellQuote(device)} ${type} ${code} ${value}`)
+    },
+    devices: async (): Promise<Array<{ path: string; name: string }>> => {
+      const { stdout } = await this.shell.exec('getevent -p')
+      const out: Array<{ path: string; name: string }> = []
+      for (const block of stdout.split(/(?=^add device)/m)) {
+        const path = block.match(/^add device \d+: (\S+)/m)?.[1]
+        const name = block.match(/\s+name:\s+"([^"]+)"/)?.[1]
+        if (path) out.push({ path, name: name ?? path })
+      }
+      return out
     },
   }
 
@@ -493,16 +870,68 @@ class AdbDeviceAPI implements DeviceAPI {
         alphaLength: fb.alpha_length,
       }
     },
+    record: async (opts?: { size?: string; bitRate?: number; timeLimitSec?: number; remotePath?: string }) => {
+      const remotePath = opts?.remotePath ?? `/sdcard/screenrecord-${Date.now()}.mp4`
+      const parts = ['screenrecord']
+      if (opts?.size) parts.push('--size', opts.size)
+      if (opts?.bitRate) parts.push('--bit-rate', String(opts.bitRate * 1000))
+      if (opts?.timeLimitSec) parts.push('--time-limit', String(opts.timeLimitSec))
+      parts.push(shellQuote(remotePath))
+      const proc = await this.shell.spawn(parts.join(' '))
+      let stopped = false
+      return {
+        path: remotePath,
+        stop: async () => {
+          if (stopped) return
+          stopped = true
+          try { await proc.kill() } catch { /* ignore */ }
+          try { await proc.exit } catch { /* ignore */ }
+          // 给 muxer 回写点时间
+          await new Promise((r) => setTimeout(r, 800))
+        },
+        pull: async () => {
+          const bytes = await this.fs.read(remotePath)
+          return bytes
+        },
+      }
+    },
+    wakeUp: async () => { await this.shell.exec('input keyevent KEYCODE_WAKEUP') },
+    sleep: async () => { await this.shell.exec('input keyevent KEYCODE_SLEEP') },
+    getBrightness: async () => {
+      const v = await this.settings.get('system', 'screen_brightness')
+      if (!v) return null
+      const n = Number(v)
+      return Number.isFinite(n) ? Math.round(n / 255 * 100) : null
+    },
+    setBrightness: async (percent: number) => {
+      const pct = Math.max(0, Math.min(100, percent))
+      const raw = Math.round(pct / 100 * 255)
+      await this.settings.put('system', 'screen_brightness_mode', '0') // 手动模式
+      await this.settings.put('system', 'screen_brightness', String(raw))
+    },
+    setRotation: async (deg: 0 | 90 | 180 | 270) => {
+      const map = { 0: 0, 90: 1, 180: 2, 270: 3 } as const
+      await this.settings.put('system', 'accelerometer_rotation', '0')
+      await this.settings.put('system', 'user_rotation', String(map[deg]))
+    },
+    getOffTimeout: async () => {
+      const v = await this.settings.get('system', 'screen_off_timeout')
+      return v ? Number(v) || 0 : 0
+    },
+    setOffTimeout: async (ms: number) => {
+      await this.settings.put('system', 'screen_off_timeout', String(Math.max(0, Math.floor(ms))))
+    },
   }
 
   // ---- app ----
 
   app = {
-    list: async (opts?: { system?: boolean; thirdParty?: boolean }): Promise<string[]> => {
-      let flag = ''
-      if (opts?.thirdParty) flag = ' -3'
-      else if (opts?.system) flag = ' -s'
-      const { stdout } = await this.shell.exec(`pm list packages${flag}`)
+    list: async (opts?: { system?: boolean; thirdParty?: boolean; user?: number }): Promise<string[]> => {
+      const flags: string[] = []
+      if (opts?.thirdParty) flags.push('-3')
+      else if (opts?.system) flags.push('-s')
+      if (opts?.user !== undefined) flags.push(`--user ${opts.user}`)
+      const { stdout } = await this.shell.exec(`pm list packages ${flags.join(' ')}`.trim())
       return stdout
         .split('\n')
         .map((l) => l.trim())
@@ -558,6 +987,139 @@ class AdbDeviceAPI implements DeviceAPI {
     },
     revoke: async (pkg: string, permission: string) => {
       await this.shell.exec(`pm revoke ${shellQuote(pkg)} ${shellQuote(permission)}`)
+    },
+
+    install: async (source: Uint8Array | Blob | { devicePath: string }, opts?: InstallOptions) => {
+      const flags = buildInstallFlags(opts)
+      // 三种输入形式
+      if ((source as { devicePath: string }).devicePath) {
+        const { devicePath } = source as { devicePath: string }
+        const res = await this.shell.exec(`pm install ${flags} ${shellQuote(devicePath)}`)
+        if (!/Success/.test(res.stdout) || res.exitCode !== 0) {
+          throw new Error(res.stdout + res.stderr || 'pm install 失败')
+        }
+        return
+      }
+      const bytes = source instanceof Uint8Array
+        ? source
+        : new Uint8Array(await (source as Blob).arrayBuffer())
+      // 先 push 到 /data/local/tmp，再 pm install。比 exec-in stdin 稳（很多驱动在 WebUSB 下立 dead）
+      const tmp = `/data/local/tmp/dive-install-${Date.now()}.apk`
+      await this.fs.write(tmp, bytes)
+      try {
+        const res = await this.shell.exec(`pm install ${flags} ${shellQuote(tmp)}`)
+        if (!/Success/.test(res.stdout) || res.exitCode !== 0) {
+          throw new Error(res.stdout + res.stderr || 'pm install 失败')
+        }
+      } finally {
+        await this.fs.rm(tmp).catch(() => { /* ignore */ })
+      }
+    },
+
+    installMulti: async (sources: Array<Uint8Array | Blob | { devicePath: string }>, opts?: InstallOptions) => {
+      const flags = buildInstallFlags(opts)
+      // 在设备端准备 session 上传
+      const sizes: number[] = []
+      const devicePaths: string[] = []
+      const tmpsToClean: string[] = []
+      for (let i = 0; i < sources.length; i++) {
+        const src = sources[i]
+        if ((src as { devicePath: string }).devicePath) {
+          devicePaths.push((src as { devicePath: string }).devicePath)
+          continue
+        }
+        const bytes = src instanceof Uint8Array
+          ? src
+          : new Uint8Array(await (src as Blob).arrayBuffer())
+        const p = `/data/local/tmp/dive-install-${Date.now()}-${i}.apk`
+        await this.fs.write(p, bytes)
+        devicePaths.push(p)
+        tmpsToClean.push(p)
+        sizes.push(bytes.byteLength)
+      }
+      try {
+        // pm install-create / install-write / install-commit
+        const create = await this.shell.exec(`pm install-create ${flags}`)
+        const sessionId = create.stdout.match(/\[(\d+)\]/)?.[1]
+        if (!sessionId) throw new Error(`install-create 失败: ${create.stdout}${create.stderr}`)
+        for (let i = 0; i < devicePaths.length; i++) {
+          const sz = sizes[i] ?? 0
+          const name = `split_${i}.apk`
+          const writeCmd = sz
+            ? `pm install-write -S ${sz} ${sessionId} ${name} ${shellQuote(devicePaths[i])}`
+            : `pm install-write ${sessionId} ${name} ${shellQuote(devicePaths[i])}`
+          const w = await this.shell.exec(writeCmd)
+          if (w.exitCode !== 0) {
+            await this.shell.exec(`pm install-abandon ${sessionId}`).catch(() => { /* ignore */ })
+            throw new Error(`install-write 失败: ${w.stdout}${w.stderr}`)
+          }
+        }
+        const commit = await this.shell.exec(`pm install-commit ${sessionId}`)
+        if (!/Success/.test(commit.stdout) || commit.exitCode !== 0) {
+          throw new Error(`install-commit 失败: ${commit.stdout}${commit.stderr}`)
+        }
+      } finally {
+        for (const p of tmpsToClean) await this.fs.rm(p).catch(() => { /* ignore */ })
+      }
+    },
+
+    permissions: async (pkg: string): Promise<Array<{ name: string; granted: boolean }>> => {
+      const out = await this.pm.dump(pkg)
+      const perms: Array<{ name: string; granted: boolean }> = []
+      // install permissions:
+      //   android.permission.INTERNET: granted=true
+      for (const line of out.split('\n')) {
+        const m = line.match(/^\s*(android\.permission\.[\w.]+|com\.[\w.]+\.permission\.[\w.]+):\s*granted=(true|false)/)
+        if (m) perms.push({ name: m[1], granted: m[2] === 'true' })
+      }
+      return perms
+    },
+
+    components: async (pkg: string) => {
+      const out = await this.pm.dump(pkg)
+      const section = (head: string): string[] => {
+        const re = new RegExp(`${head}:[\\s\\S]*?(?=\\n\\s{2}[A-Za-z ]+:|$)`, 'g')
+        const m = out.match(re)?.[0] ?? ''
+        const names = new Set<string>()
+        // "    <component>com.pkg/.Main</component>" 或 "    Action: … Component: com.pkg/.Main"
+        for (const line of m.split('\n')) {
+          const c = line.match(/(\w[\w.]*\/[\w.$]+)/)?.[1]
+          if (c) names.add(c)
+        }
+        return [...names]
+      }
+      return {
+        activities: section('Activity Resolver Table'),
+        services: section('Service Resolver Table'),
+        receivers: section('Receiver Resolver Table'),
+        providers: section('Provider Resolver Table'),
+      }
+    },
+
+    launcherComponent: async (pkg: string): Promise<string | null> => {
+      const { stdout } = await this.shell.exec(
+        `cmd package resolve-activity --brief -c android.intent.category.LAUNCHER ${shellQuote(pkg)}`,
+      )
+      const m = stdout.match(/^[\w.]+\/[\w.$]+$/m)
+      return m ? m[0] : null
+    },
+
+    resolve: async (intent: IntentSpec): Promise<string[]> => {
+      const args = buildIntentArgs(intent)
+      const { stdout } = await this.shell.exec(`cmd package resolve-activity --brief ${args}`)
+      return stdout.split('\n').map((l) => l.trim()).filter((l) => /^[\w.]+\/[\w.$]+$/.test(l))
+    },
+
+    trimCache: async (pkg: string) => {
+      await this.shell.exec(`pm trim-caches 512M`)
+      await this.shell.exec(`pm clear-cached ${shellQuote(pkg)}`).catch(() => { /* ignore 老版本 */ })
+    },
+
+    apkPaths: async (pkg: string): Promise<string[]> => {
+      const { stdout } = await this.shell.exec(`pm path ${shellQuote(pkg)}`)
+      return stdout.split('\n').map((l) => l.trim())
+        .filter((l) => l.startsWith('package:'))
+        .map((l) => l.slice('package:'.length))
     },
   }
 
@@ -794,11 +1356,444 @@ class AdbDeviceAPI implements DeviceAPI {
     killPid: async (pid: number) => {
       await this.shell.exec(`kill ${pid}`)
     },
+
+    services: async (): Promise<string[]> => {
+      const { stdout } = await this.shell.exec('service list')
+      const svcs: string[] = []
+      for (const line of stdout.split('\n')) {
+        const m = line.match(/^\s*\d+\s+([\w.\-]+):/)
+        if (m) svcs.push(m[1])
+      }
+      return svcs
+    },
+    dumpsys: async (service: string, args: string[] = []): Promise<string> => {
+      const cmd = `dumpsys ${shellQuote(service)} ${args.map(shellQuote).join(' ')}`.trim()
+      const { stdout } = await this.shell.exec(cmd)
+      return stdout
+    },
+    logcat: async (opts?: LogcatOptions | string): Promise<SpawnedProcess> => {
+      return this.log.spawn(typeof opts === 'string' ? { filters: [opts] } : opts)
+    },
+    getevent: async (devicePath?: string): Promise<SpawnedProcess> => {
+      const cmd = devicePath ? `getevent -l ${shellQuote(devicePath)}` : 'getevent -l'
+      return this.shell.spawn(cmd)
+    },
+    summary: async () => {
+      const [props, disp, up] = await Promise.all([
+        this.prop.all(),
+        this.shell.exec('wm size; wm density').catch(() => ({ stdout: '' })),
+        this.system.uptime().catch(() => 0),
+      ])
+      const abis = (props['ro.product.cpu.abilist'] ?? props['ro.product.cpu.abi'] ?? '')
+        .split(',').map((s) => s.trim()).filter(Boolean)
+      const sdk = Number(props['ro.build.version.sdk']) || undefined
+      const size = disp.stdout.match(/(?:Override|Physical) size:\s*(\d+)x(\d+)/)
+      const dens = disp.stdout.match(/(?:Override|Physical) density:\s*(\d+)/)
+      return {
+        model: props['ro.product.model'],
+        brand: props['ro.product.brand'],
+        manufacturer: props['ro.product.manufacturer'],
+        serial: props['ro.serialno'],
+        sdk,
+        androidVersion: props['ro.build.version.release'],
+        abis,
+        density: dens ? Number(dens[1]) : undefined,
+        displaySize: size ? { width: Number(size[1]), height: Number(size[2]) } : undefined,
+        bootId: props['ro.boot.bootid'] ?? props['ro.boot.boot_id'],
+        uptime: up,
+      }
+    },
+    uptime: async (): Promise<number> => {
+      const { stdout } = await this.shell.exec('cat /proc/uptime')
+      return Number(stdout.trim().split(/\s+/)[0]) || 0
+    },
   }
 
-  async logcat(filter?: string): Promise<SpawnedProcess> {
-    const cmd = filter ? `logcat ${filter}` : 'logcat'
-    return this.shell.spawn(cmd)
+  // ---- am ----
+
+  am = {
+    start: async (intent: IntentSpec, opts?: { waitForLaunch?: boolean; user?: number }) => {
+      const flags: string[] = []
+      if (opts?.waitForLaunch) flags.push('-W')
+      if (opts?.user !== undefined) flags.push(`--user ${opts.user}`)
+      return this.shell.exec(`am start ${flags.join(' ')} ${buildIntentArgs(intent)}`.trim())
+    },
+    startService: async (intent: IntentSpec) =>
+      this.shell.exec(`am start-foreground-service ${buildIntentArgs(intent)}`.trim()),
+    broadcast: async (intent: IntentSpec) =>
+      this.shell.exec(`am broadcast ${buildIntentArgs(intent)}`.trim()),
+    kill: async (pkg: string) => { await this.shell.exec(`am kill ${shellQuote(pkg)}`) },
+    killAll: async () => { await this.shell.exec('am kill-all') },
+    forceStop: async (pkg: string) => { await this.shell.exec(`am force-stop ${shellQuote(pkg)}`) },
+    crash: async (pkg: string) => { await this.shell.exec(`am crash ${shellQuote(pkg)}`) },
+    toUri: async (intent: IntentSpec): Promise<string> => {
+      const { stdout } = await this.shell.exec(`am to-uri ${buildIntentArgs(intent)}`.trim())
+      return stdout.trim()
+    },
+    setStandby: async (pkg: string, bucket: 'active' | 'working_set' | 'frequent' | 'rare' | 'restricted') => {
+      await this.shell.exec(`am set-standby-bucket ${shellQuote(pkg)} ${bucket}`)
+    },
+    monitor: async (): Promise<SpawnedProcess> => this.shell.spawn('am monitor'),
+  }
+
+  // ---- pm ----
+
+  pm = {
+    features: async (): Promise<string[]> => {
+      const { stdout } = await this.shell.exec('pm list features')
+      return stdout.split('\n').filter((l) => l.startsWith('feature:'))
+        .map((l) => l.slice('feature:'.length).trim())
+    },
+    libraries: async (): Promise<string[]> => {
+      const { stdout } = await this.shell.exec('pm list libraries')
+      return stdout.split('\n').filter((l) => l.startsWith('library:'))
+        .map((l) => l.slice('library:'.length).trim())
+    },
+    instrumentations: async () => {
+      const { stdout } = await this.shell.exec('pm list instrumentation')
+      const out: Array<{ target: string; component: string }> = []
+      // instrumentation:pkg/runner (target=pkg)
+      for (const line of stdout.split('\n')) {
+        const m = line.match(/^instrumentation:([\w.]+\/[\w.$]+)\s*\(target=([\w.]+)\)/)
+        if (m) out.push({ component: m[1], target: m[2] })
+      }
+      return out
+    },
+    users: async () => {
+      const { stdout } = await this.shell.exec('pm list users')
+      const out: Array<{ id: number; name: string; flags: string }> = []
+      for (const line of stdout.split('\n')) {
+        const m = line.match(/UserInfo\{(\d+):([^:]+):([\dA-Fa-fxX]+)\}/)
+        if (m) out.push({ id: Number(m[1]), name: m[2], flags: m[3] })
+      }
+      return out
+    },
+    maxUsers: async (): Promise<number> => {
+      const { stdout } = await this.shell.exec('pm get-max-users')
+      return Number(stdout.match(/\d+/)?.[0] ?? '0')
+    },
+    path: async (pkg: string): Promise<string | null> => {
+      const all = await this.app.apkPaths(pkg)
+      return all[0] ?? null
+    },
+    dump: async (pkg: string): Promise<string> => {
+      const { stdout } = await this.shell.exec(`dumpsys package ${shellQuote(pkg)}`)
+      return stdout
+    },
+  }
+
+  // ---- settings ----
+
+  settings = {
+    get: async (ns: SettingsNamespace, key: string): Promise<string | null> => {
+      const { stdout, exitCode } = await this.shell.exec(`settings get ${ns} ${shellQuote(key)}`)
+      if (exitCode !== 0) return null
+      const v = stdout.trim()
+      return v && v !== 'null' ? v : null
+    },
+    put: async (ns: SettingsNamespace, key: string, value: string) => {
+      await this.shell.exec(`settings put ${ns} ${shellQuote(key)} ${shellQuote(value)}`)
+    },
+    delete: async (ns: SettingsNamespace, key: string) => {
+      await this.shell.exec(`settings delete ${ns} ${shellQuote(key)}`)
+    },
+    list: async (ns: SettingsNamespace): Promise<Record<string, string>> => {
+      const { stdout } = await this.shell.exec(`settings list ${ns}`)
+      const out: Record<string, string> = {}
+      for (const line of stdout.split('\n')) {
+        const idx = line.indexOf('=')
+        if (idx > 0) out[line.slice(0, idx)] = line.slice(idx + 1)
+      }
+      return out
+    },
+  }
+
+  // ---- prop ----
+
+  prop = {
+    get: async (key: string): Promise<string | null> => {
+      const { stdout } = await this.shell.exec(`getprop ${shellQuote(key)}`)
+      const v = stdout.trim()
+      return v ? v : null
+    },
+    set: async (key: string, value: string) => {
+      await this.shell.exec(`setprop ${shellQuote(key)} ${shellQuote(value)}`)
+    },
+    all: async (): Promise<Record<string, string>> => this.system.getProps(),
+  }
+
+  // ---- wm ----
+
+  wm = {
+    size: async () => {
+      const { stdout } = await this.shell.exec('wm size')
+      const phys = stdout.match(/Physical size:\s*(\d+)x(\d+)/)
+      const over = stdout.match(/Override size:\s*(\d+)x(\d+)/)
+      return {
+        width: Number(phys?.[1] ?? 0),
+        height: Number(phys?.[2] ?? 0),
+        override: over ? { width: Number(over[1]), height: Number(over[2]) } : undefined,
+      }
+    },
+    setSize: async (w: number, h: number) => { await this.shell.exec(`wm size ${w}x${h}`) },
+    resetSize: async () => { await this.shell.exec('wm size reset') },
+    density: async () => {
+      const { stdout } = await this.shell.exec('wm density')
+      const phys = stdout.match(/Physical density:\s*(\d+)/)
+      const over = stdout.match(/Override density:\s*(\d+)/)
+      return {
+        physical: Number(phys?.[1] ?? 0),
+        override: over ? Number(over[1]) : undefined,
+      }
+    },
+    setDensity: async (dpi: number) => { await this.shell.exec(`wm density ${dpi}`) },
+    resetDensity: async () => { await this.shell.exec('wm density reset') },
+    overscan: async (l: number, t: number, r: number, b: number) => { await this.shell.exec(`wm overscan ${l},${t},${r},${b}`) },
+    resetOverscan: async () => { await this.shell.exec('wm overscan reset') },
+    setUserRotation: async (mode: 'lock' | 'free', degrees?: 0 | 1 | 2 | 3) => {
+      await this.shell.exec(`wm user-rotation ${mode}${degrees !== undefined ? ` ${degrees}` : ''}`)
+    },
+  }
+
+  // ---- content ----
+
+  content = {
+    query: async (uri: string, opts?: { projection?: string[]; where?: string; sort?: string; user?: number }) => {
+      const parts = ['content query --uri', shellQuote(uri)]
+      if (opts?.projection?.length) parts.push('--projection', shellQuote(opts.projection.join(':')))
+      if (opts?.where) parts.push('--where', shellQuote(opts.where))
+      if (opts?.sort) parts.push('--sort', shellQuote(opts.sort))
+      if (opts?.user !== undefined) parts.push('--user', String(opts.user))
+      const { stdout } = await this.shell.exec(parts.join(' '))
+      return stdout
+    },
+    insert: async (uri: string, values: Record<string, string | number | boolean | null>, opts?: { user?: number }) => {
+      const parts = ['content insert --uri', shellQuote(uri), ...contentBindArgs(values)]
+      if (opts?.user !== undefined) parts.push('--user', String(opts.user))
+      const { stdout } = await this.shell.exec(parts.join(' '))
+      return stdout
+    },
+    update: async (uri: string, values: Record<string, string | number | boolean | null>, opts?: { where?: string; user?: number }) => {
+      const parts = ['content update --uri', shellQuote(uri), ...contentBindArgs(values)]
+      if (opts?.where) parts.push('--where', shellQuote(opts.where))
+      if (opts?.user !== undefined) parts.push('--user', String(opts.user))
+      const { stdout } = await this.shell.exec(parts.join(' '))
+      return stdout
+    },
+    delete: async (uri: string, opts?: { where?: string; user?: number }) => {
+      const parts = ['content delete --uri', shellQuote(uri)]
+      if (opts?.where) parts.push('--where', shellQuote(opts.where))
+      if (opts?.user !== undefined) parts.push('--user', String(opts.user))
+      const { stdout } = await this.shell.exec(parts.join(' '))
+      return stdout
+    },
+    call: async (uri: string, method: string, arg?: string, extras?: Record<string, string | number | boolean>) => {
+      const parts = ['content call --uri', shellQuote(uri), '--method', shellQuote(method)]
+      if (arg) parts.push('--arg', shellQuote(arg))
+      if (extras) parts.push(...contentBindArgs(extras))
+      const { stdout } = await this.shell.exec(parts.join(' '))
+      return stdout
+    },
+  }
+
+  // ---- svc ----
+
+  svc = {
+    wifi: async (on: boolean) => { await this.shell.exec(`svc wifi ${on ? 'enable' : 'disable'}`) },
+    data: async (on: boolean) => { await this.shell.exec(`svc data ${on ? 'enable' : 'disable'}`) },
+    bluetooth: async (on: boolean) => { await this.shell.exec(`svc bluetooth ${on ? 'enable' : 'disable'}`) },
+    nfc: async (on: boolean) => { await this.shell.exec(`svc nfc ${on ? 'enable' : 'disable'}`) },
+    stayOn: async (mode: boolean | 'usb' | 'ac' | 'wireless') => {
+      const v = typeof mode === 'boolean' ? (mode ? 'true' : 'false') : mode
+      await this.shell.exec(`svc power stayon ${v}`)
+    },
+    reboot: async (mode?: 'recovery' | 'bootloader' | 'sideload' | 'fastboot') => {
+      await this.shell.exec(`svc power reboot${mode ? ` ${mode}` : ''}`)
+    },
+  }
+
+  // ---- net ----
+
+  net = {
+    connect: async (service: string) => {
+      const socket = await this.conn.adb.createSocket(service)
+      return {
+        readable: socket.readable as unknown as RS<Uint8Array>,
+        writable: socket.writable as unknown as WS<Uint8Array>,
+        close: async () => { await socket.close() },
+      }
+    },
+    reverseList: async () => {
+      const list = await this.conn.adb.reverse.list()
+      return list.map((e) => ({ local: e.localName, remote: e.remoteName }))
+    },
+    reverse: async (
+      deviceAddress: string,
+      handler: (socket: { readable: RS<Uint8Array>; writable: WS<Uint8Array>; close(): Promise<void> }) => void | Promise<void>,
+      localAddress?: string,
+    ) => {
+      return this.conn.adb.reverse.add(deviceAddress, async (rawSocket) => {
+        await handler({
+          readable: rawSocket.readable as unknown as RS<Uint8Array>,
+          writable: rawSocket.writable as unknown as WS<Uint8Array>,
+          close: async () => { await rawSocket.close() },
+        })
+      }, localAddress)
+    },
+    reverseRemove: async (deviceAddress: string) => {
+      await this.conn.adb.reverse.remove(deviceAddress)
+    },
+    reverseRemoveAll: async () => { await this.conn.adb.reverse.removeAll() },
+    interfaces: async () => {
+      const { stdout } = await this.shell.exec('ip -o addr; ip -o link')
+      const byName: Record<string, { name: string; ipv4?: string; ipv6?: string; mac?: string; mtu?: number; up: boolean }> = {}
+      for (const line of stdout.split('\n')) {
+        const mAddr = line.match(/^\d+:\s+(\S+)\s+inet6?\s+([0-9a-f:.]+)/i)
+        if (mAddr) {
+          const [, name, addr] = mAddr
+          byName[name] ??= { name, up: true }
+          if (addr.includes(':')) byName[name].ipv6 = addr.split('/')[0]
+          else byName[name].ipv4 = addr.split('/')[0]
+          continue
+        }
+        const mLink = line.match(/^\d+:\s+(\S+):\s+<([^>]+)>\s+mtu\s+(\d+).*?link\/\S+\s+([0-9a-f:]{17})?/i)
+        if (mLink) {
+          const [, name, flags, mtu, mac] = mLink
+          const stripped = name.replace(/@.*/, '')
+          byName[stripped] ??= { name: stripped, up: false }
+          byName[stripped].mtu = Number(mtu)
+          if (mac) byName[stripped].mac = mac
+          byName[stripped].up = /UP/.test(flags) && !/NO-CARRIER/.test(flags)
+        }
+      }
+      return Object.values(byName)
+    },
+    ping: async (host: string, count = 4) => {
+      const { stdout } = await this.shell.exec(`ping -c ${count} -W 2 ${shellQuote(host)}`)
+      const m = stdout.match(/(\d+)\s+packets transmitted,\s+(\d+)\s+received/)
+      const avg = stdout.match(/\/(\d+\.\d+)\//)?.[1]
+      return {
+        transmitted: Number(m?.[1] ?? 0),
+        received: Number(m?.[2] ?? 0),
+        avgMs: avg ? Number(avg) : undefined,
+        raw: stdout,
+      }
+    },
+    netstat: async (flags = '-tun') => {
+      const { stdout } = await this.shell.exec(`netstat ${flags}`)
+      return stdout
+    },
+  }
+
+  // ---- power ----
+
+  power = {
+    reboot: async (mode?: 'recovery' | 'bootloader' | 'sideload' | 'fastboot') => { await this.shell.exec(`reboot${mode ? ` ${mode}` : ''}`) },
+    shutdown: async () => { await this.shell.exec('reboot -p') },
+    lock: async () => { await this.shell.exec('input keyevent KEYCODE_SLEEP') },
+    wake: async () => { await this.shell.exec('input keyevent KEYCODE_WAKEUP') },
+    isInteractive: async () => {
+      const { stdout } = await this.shell.exec('dumpsys power | grep -E "mWakefulness|Display Power"')
+      return /Awake|state=ON/.test(stdout)
+    },
+    setCharging: async (plugged: boolean) => {
+      await this.shell.exec(plugged ? 'dumpsys battery set ac 1' : 'dumpsys battery unplug')
+    },
+    resetBattery: async () => { await this.shell.exec('dumpsys battery reset') },
+  }
+
+  // ---- log ----
+
+  log = {
+    spawn: async (opts?: LogcatOptions): Promise<SpawnedProcess> => {
+      return this.shell.spawn(buildLogcatCommand(opts, /* oneShot */ false))
+    },
+    tail: async (opts?: LogcatOptions & { lines?: number }): Promise<string> => {
+      const cmd = buildLogcatCommand(opts, /* oneShot */ true)
+      const lines = opts?.lines ?? opts?.tail ?? 200
+      const { stdout } = await this.shell.exec(`${cmd} | tail -n ${lines}`)
+      return stdout
+    },
+    clear: async () => { await this.shell.exec('logcat -c') },
+    bufferSize: async (kb?: number): Promise<string> => {
+      if (kb === undefined) {
+        const { stdout } = await this.shell.exec('logcat -g')
+        return stdout
+      }
+      await this.shell.exec(`logcat -G ${kb}K`)
+      return `set to ${kb}K`
+    },
+  }
+
+  // ---- media ----
+
+  media = {
+    volumeUp: async () => { await this.input.key('KEYCODE_VOLUME_UP') },
+    volumeDown: async () => { await this.input.key('KEYCODE_VOLUME_DOWN') },
+    mute: async () => { await this.input.key('KEYCODE_VOLUME_MUTE') },
+    play: async () => { await this.input.key('KEYCODE_MEDIA_PLAY') },
+    pause: async () => { await this.input.key('KEYCODE_MEDIA_PAUSE') },
+    next: async () => { await this.input.key('KEYCODE_MEDIA_NEXT') },
+    prev: async () => { await this.input.key('KEYCODE_MEDIA_PREVIOUS') },
+    setMediaVolume: async (stream: 'ring' | 'music' | 'alarm' | 'voice_call' | 'notification' | 'system', value: number) => {
+      const streamMap: Record<string, number> = {
+        voice_call: 0, system: 1, ring: 2, music: 3, alarm: 4, notification: 5,
+      }
+      const idx = streamMap[stream] ?? 3
+      await this.shell.exec(`media volume --stream ${idx} --set ${value}`)
+    },
+  }
+
+  // ---- raw 逃生舱 ----
+
+  raw: DeviceAPI['raw'] = (() => {
+    const conn = this.conn
+    return {
+      connection: conn,
+      adb: conn.adb,
+      createSocket: async (service: string) => {
+        const socket = await conn.adb.createSocket(service)
+        return {
+          readable: socket.readable as unknown as RS<Uint8Array>,
+          writable: socket.writable as unknown as WS<Uint8Array>,
+          close: async () => { await socket.close() },
+        }
+      },
+      openSync: async () => {
+        const sync = await conn.adb.sync()
+        return sync as unknown as {
+          read(path: string): RS<Uint8Array>
+          write(args: { filename: string; file: RS<Uint8Array>; mode?: number; mtime?: number }): Promise<void>
+          opendir(path: string): AsyncIterable<unknown>
+          lstat(path: string): Promise<unknown>
+          dispose(): Promise<void>
+        }
+      },
+    }
+  })()
+
+  // ---- extend ----
+
+  private _extensions = new Map<string, object>()
+
+  extend<T extends object>(name: string, factory: (device: DeviceAPI) => T): T {
+    if (!name || /[^a-zA-Z0-9_$]/.test(name)) {
+      throw new Error(`extend: invalid name ${JSON.stringify(name)}`)
+    }
+    if (['fs','shell','input','screen','app','system','am','pm','settings','prop','wm','content','svc','net','power','log','media','raw','extend','id','logcat'].includes(name)) {
+      throw new Error(`extend: name ${name} 和内置命名空间冲突`)
+    }
+    if (this._extensions.has(name)) return this._extensions.get(name) as T
+    const obj = factory(this as unknown as DeviceAPI)
+    this._extensions.set(name, obj as object)
+    Object.defineProperty(this, name, { value: obj, writable: false, enumerable: true, configurable: true })
+    return obj
+  }
+
+  // 历史兼容
+  async logcat(filter?: string | LogcatOptions): Promise<SpawnedProcess> {
+    if (typeof filter === 'string' && filter) return this.log.spawn({ filters: [filter] })
+    return this.log.spawn(typeof filter === 'object' ? filter : undefined)
   }
 }
 
@@ -863,6 +1858,81 @@ function mapBatteryHealth(code: string | undefined): string | undefined {
 function mapBatteryPlugged(code: string | undefined): string | undefined {
   if (!code) return undefined
   return ({ '0': 'None', '1': 'AC', '2': 'USB', '4': 'Wireless' } as Record<string, string>)[code] ?? code
+}
+
+// ============ pm install / intent / content / logcat helpers ============
+
+function buildInstallFlags(opts?: InstallOptions): string {
+  const parts: string[] = []
+  if (opts?.replace) parts.push('-r')
+  if (opts?.downgrade) parts.push('-d')
+  if (opts?.test) parts.push('-t')
+  if (opts?.grantAll) parts.push('-g')
+  if (opts?.user !== undefined) parts.push(`--user ${opts.user}`)
+  if (opts?.extra?.length) parts.push(...opts.extra)
+  return parts.join(' ')
+}
+
+function buildIntentArgs(intent: IntentSpec): string {
+  const parts: string[] = []
+  if (intent.action) parts.push('-a', shellQuote(intent.action))
+  if (intent.data) parts.push('-d', shellQuote(intent.data))
+  if (intent.mime) parts.push('-t', shellQuote(intent.mime))
+  for (const c of intent.categories ?? []) parts.push('-c', shellQuote(c))
+  if (intent.component) parts.push('-n', shellQuote(intent.component))
+  else if (intent.pkg) parts.push('-p', shellQuote(intent.pkg))
+  if (intent.flags) parts.push('-f', String(intent.flags))
+  for (const [k, v] of Object.entries(intent.extras ?? {})) {
+    if (typeof v === 'object' && v !== null && 'type' in v) {
+      parts.push(extraFlagOf(v.type), shellQuote(k), shellQuote(String(v.value)))
+      continue
+    }
+    if (typeof v === 'boolean') { parts.push('--ez', shellQuote(k), v ? 'true' : 'false'); continue }
+    if (typeof v === 'number') {
+      parts.push(Number.isInteger(v) ? '--ei' : '--ef', shellQuote(k), String(v))
+      continue
+    }
+    parts.push('--es', shellQuote(k), shellQuote(String(v)))
+  }
+  if (intent.raw?.length) parts.push(...intent.raw)
+  return parts.join(' ')
+}
+
+function extraFlagOf(t: 'uri' | 'string' | 'int' | 'long' | 'float' | 'bool'): string {
+  switch (t) {
+    case 'uri': return '--eu'
+    case 'int': return '--ei'
+    case 'long': return '--el'
+    case 'float': return '--ef'
+    case 'bool': return '--ez'
+    case 'string':
+    default: return '--es'
+  }
+}
+
+function contentBindArgs(values: Record<string, string | number | boolean | null>): string[] {
+  const out: string[] = []
+  for (const [k, v] of Object.entries(values)) {
+    if (v === null) { out.push('--bind', shellQuote(`${k}:n:`)); continue }
+    if (typeof v === 'boolean') { out.push('--bind', shellQuote(`${k}:b:${v}`)); continue }
+    if (typeof v === 'number') {
+      const tag = Number.isInteger(v) ? 'i' : 'd'
+      out.push('--bind', shellQuote(`${k}:${tag}:${v}`)); continue
+    }
+    out.push('--bind', shellQuote(`${k}:s:${v}`))
+  }
+  return out
+}
+
+function buildLogcatCommand(opts: LogcatOptions | undefined, oneShot: boolean): string {
+  const parts = ['logcat']
+  if (opts?.buffer) parts.push('-b', opts.buffer)
+  if (opts?.format) parts.push('-v', opts.format)
+  if (oneShot) parts.push('-d') // dump and exit
+  if (opts?.pid !== undefined) parts.push(`--pid=${opts.pid}`)
+  if (opts?.filters?.length) parts.push(...opts.filters.map(shellQuote))
+  else if (!opts?.pid) parts.push('*:V')
+  return parts.join(' ')
 }
 
 // ============ 工厂 + 注册表 ============
