@@ -101,6 +101,8 @@ async function onMouseUp(ev: MouseEvent) {
 
 async function onKey(ev: KeyboardEvent) {
   if (!device.value) return
+  // IME 候选状态不要把键打到设备，让输入法先处理
+  if (ev.isComposing || ev.keyCode === 229 || ev.key === 'Process') return
   if (ev.key === 'Backspace') {
     ev.preventDefault()
     await device.value.input.key('KEYCODE_DEL')
@@ -138,10 +140,16 @@ watch(() => win.value.deviceId, async () => {
   await refreshSize()
   await captureOnce()
 })
+async function onCompositionEnd(ev: CompositionEvent) {
+  // 拼音/注音/日文/韩文输入法上屏后一次性发给设备
+  const text = ev.data
+  if (!text || !device.value) return
+  try { await device.value.input.text(text) } catch (err) { console.error('[screencast/composition]', err) }
+}
 </script>
 
 <template>
-  <div class="cast" tabindex="0" @keydown="onKey">
+  <div class="cast" tabindex="0" @keydown="onKey" @compositionend="onCompositionEnd">
     <div class="toolbar">
       <button v-if="!playing" @click="play">▶ 实时</button>
       <button v-else @click="pause">⏸ 暂停</button>

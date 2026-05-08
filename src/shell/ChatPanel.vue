@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { chat, sendOrQueue, agentState, agentSettings } from '@/services'
 import type { AgentImage } from '@/services/agent'
+import { useComposingLock } from '@/composables'
 
 export type ChatPosition = 'left' | 'right' | 'float' | 'hidden'
 
@@ -18,6 +19,14 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const attachments = ref<AgentImage[]>([])
 const dragOver = ref(false)
 const previewUrl = ref<string | null>(null)
+
+const { composing, onCompositionStart, onCompositionEnd } = useComposingLock()
+
+function onInputKey(e: KeyboardEvent) {
+  if (e.key !== 'Enter' || e.shiftKey || e.isComposing || composing.value || e.keyCode === 229) return
+  e.preventDefault()
+  onSend()
+}
 
 function scrollBottom() {
   requestAnimationFrame(() => {
@@ -262,7 +271,9 @@ onBeforeUnmount(() => { stopWatching?.() })
           v-model="input"
           rows="3"
           :placeholder="dragOver ? '松开鼠标添加图片' : (agentState.running ? '输入消息入排队… (Enter 发送，可粘图)' : '告诉 Agent 你想做什么…（可粘/拖拽图片）')"
-          @keydown.enter.exact.prevent="onSend"
+          @keydown="onInputKey"
+          @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd"
           @paste="onPaste"
         />
         <button class="send" @click="onSend" :disabled="!input.trim() && !attachments.length">

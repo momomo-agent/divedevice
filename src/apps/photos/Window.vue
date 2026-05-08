@@ -170,6 +170,10 @@ function next() {
 }
 function onKey(e: KeyboardEvent) {
   if (previewIndex.value === null) return
+  // IME 候选/正在输入的 input/textarea 不抢方向键
+  if (e.isComposing || e.keyCode === 229) return
+  const active = document.activeElement as HTMLElement | null
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return
   if (e.key === 'Escape') closePreview()
   else if (e.key === 'ArrowLeft') prev()
   else if (e.key === 'ArrowRight') next()

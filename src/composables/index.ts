@@ -50,3 +50,5 @@ export function useChat() {
 export function useDeviceHub() {
   return deviceHub
 }
+
+export { useComposingLock, isImeKeydown } from './useComposingLock'
