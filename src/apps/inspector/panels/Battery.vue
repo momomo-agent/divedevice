@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, onBeforeUnmount } from 'vue'
+import { ref, onMounted, computed, onBeforeUnmount, watch, inject, type Ref } from 'vue'
 import type { DeviceAPI, BatteryInfo } from '@/device'
 import Donut from '../components/Donut.vue'
 import GaugeBar from '../components/GaugeBar.vue'
@@ -16,7 +16,18 @@ let timer: number | null = null
 
 async function load() {
   if (!props.device) return
-  try { b.value = await props.device.system.battery() } catch (err) { error.value = (err as Error).message }
+  try { b.value = await props.device.system.battery(); error.value = null } catch (err) { error.value = (err as Error).message }
+}
+
+function recordPoint() {
+  if (percent.value !== null) {
+    pctHistory.value.push(percent.value)
+    if (pctHistory.value.length > 60) pctHistory.value.shift()
+  }
+  if (b.value.temperature !== undefined) {
+    tempHistory.value.push(b.value.temperature)
+    if (tempHistory.value.length > 60) tempHistory.value.shift()
+  }
 }
 
 onMounted(async () => {
@@ -33,17 +44,14 @@ onMounted(async () => {
   }
   timer = window.setInterval(async () => {
     await load()
-    if (percent.value !== null) {
-      pctHistory.value.push(percent.value)
-      if (pctHistory.value.length > 60) pctHistory.value.shift()
-    }
-    if (b.value.temperature !== undefined) {
-      tempHistory.value.push(b.value.temperature)
-      if (tempHistory.value.length > 60) tempHistory.value.shift()
-    }
+    recordPoint()
   }, 5000) as unknown as number
 })
 onBeforeUnmount(() => { if (timer) clearInterval(timer) })
+
+// 响应手动刷新：重新拉一下数据，追加一个历史点但保留所有现有曲线
+const tick = inject<Ref<number>>('inspector:refreshTick')
+if (tick) watch(tick, async () => { await load(); recordPoint() })
 
 const percent = computed(() => {
   if (b.value.level && b.value.scale) return Math.round((b.value.level / b.value.scale) * 100)

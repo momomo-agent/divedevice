@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
 import type { DeviceAPI, TopActivity, ActivityTask } from '@/device'
 
 const props = defineProps<{ device: DeviceAPI | null }>()
@@ -9,7 +9,7 @@ const top = ref<TopActivity | null>(null)
 const tasks = ref<ActivityTask[]>([])
 const selected = ref<ActivityTask | null>(null)
 
-onMounted(async () => {
+async function load() {
   if (!props.device) { error.value = '未连接设备'; loading.value = false; return }
   try {
     const [t, ts] = await Promise.all([
@@ -18,13 +18,23 @@ onMounted(async () => {
     ])
     top.value = t
     tasks.value = ts
-    selected.value = ts.find((x) => x.topActivity === t?.activityName) ?? ts[0] ?? null
+    // 刷新后保留用户选择：如果选中的 task 还在 就保留，不在了才 fallback
+    if (selected.value && !ts.some((x) => x.taskId === selected.value!.taskId)) {
+      selected.value = ts.find((x) => x.topActivity === t?.activityName) ?? ts[0] ?? null
+    } else if (!selected.value) {
+      selected.value = ts.find((x) => x.topActivity === t?.activityName) ?? ts[0] ?? null
+    }
+    error.value = null
   } catch (err) {
     error.value = (err as Error).message
   } finally {
     loading.value = false
   }
-})
+}
+
+onMounted(load)
+const tick = inject<Ref<number>>('inspector:refreshTick')
+if (tick) watch(tick, load)
 
 function pkgFromActivity(s?: string | null): string {
   if (!s) return ''

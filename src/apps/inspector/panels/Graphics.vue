@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
 import type { DeviceAPI } from '@/device'
 import Donut from '../components/Donut.vue'
 import GaugeBar from '../components/GaugeBar.vue'
@@ -33,6 +33,9 @@ onMounted(async () => {
   }
   load()
 })
+
+const tick = inject<Ref<number>>('inspector:refreshTick')
+if (tick) watch(tick, load)
 
 // 解析关键指标
 interface ParsedMetrics {

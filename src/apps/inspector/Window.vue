@@ -3,7 +3,7 @@
  * Inspector —— Android 设备调试观察台
  * 多 tab：Overview / Activities / Processes / Layers / Graphics / Battery / Network / Props
  */
-import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onBeforeUnmount, provide } from 'vue'
 import { useDevice, useWindow, useAppController } from '@/composables'
 import Overview from './panels/Overview.vue'
 import Activities from './panels/Activities.vue'
@@ -33,23 +33,27 @@ const tabs: Array<{ id: TabId; label: string; icon: string; comp: any }> = [
 const active = ref<TabId>('overview')
 const current = computed(() => tabs.find((t) => t.id === active.value)!)
 
-// ---- Auto-refresh state shared via provide? 简单粗暴：用 key 触发子组件重挂 ----
-const refreshKey = ref(0)
+// ---- Auto-refresh tick —— 通过 provide 下发，panel 自己决定如何 re-fetch
+// “不要用 :key 重挂组件，会在心跳上丢失用户的局部状态”——本次修复
+const refreshTick = ref(0)
 const auto = ref(false)
 let timer: number | null = null
+
+provide('inspector:refreshTick', refreshTick)
 
 function startAuto() {
   stopAuto()
   auto.value = true
-  timer = window.setInterval(() => { refreshKey.value++ }, 2000) as unknown as number
+  timer = window.setInterval(() => { refreshTick.value++ }, 2000) as unknown as number
 }
 function stopAuto() {
   auto.value = false
   if (timer) { clearInterval(timer); timer = null }
 }
-function refresh() { refreshKey.value++ }
+function refresh() { refreshTick.value++ }
 
 onBeforeUnmount(stopAuto)
+// 换设备时也只触发 re-fetch，组件不重挂
 watch(() => win.value.deviceId, () => { refresh() })
 
 useAppController({
@@ -111,7 +115,7 @@ useAppController({
     <div class="body">
       <component
         :is="current.comp"
-        :key="`${current.id}-${refreshKey}-${win.deviceId ?? ''}`"
+        :key="`${current.id}-${win.deviceId ?? ''}`"
         :device="device"
       />
     </div>

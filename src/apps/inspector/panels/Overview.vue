@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, inject, type Ref } from 'vue'
 import type { DeviceAPI, TopActivity, BatteryInfo, CpuInfo, LayerInfo, ProcessInfo } from '@/device'
 import StatCard from '../components/StatCard.vue'
 import Donut from '../components/Donut.vue'
@@ -80,6 +80,9 @@ onMounted(async () => {
   pollTimer = window.setInterval(pollLoad, 3000) as unknown as number
 })
 onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
+
+const tick = inject<Ref<number>>('inspector:refreshTick')
+if (tick) watch(tick, loadAll)
 
 // 派生指标
 const batteryPct = computed(() => {

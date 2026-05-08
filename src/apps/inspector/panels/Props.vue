@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
 import type { DeviceAPI } from '@/device'
 
 const props = defineProps<{ device: DeviceAPI | null }>()
@@ -10,16 +10,21 @@ const query = ref('')
 const activeGroup = ref<string>('')
 const viewMode = ref<'grouped' | 'table'>('grouped')
 
-onMounted(async () => {
+async function load() {
   if (!props.device) { error.value = '未连接设备'; loading.value = false; return }
   try {
     map.value = await props.device.system.getProps()
+    error.value = null
   } catch (err) {
     error.value = (err as Error).message
   } finally {
     loading.value = false
   }
-})
+}
+
+onMounted(load)
+const tick = inject<Ref<number>>('inspector:refreshTick')
+if (tick) watch(tick, load)
 
 interface Group { key: string; name: string; icon: string; entries: Array<[string, string]> }
 

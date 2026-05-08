@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
 import type { DeviceAPI, LayerInfo } from '@/device'
 import Donut from '../components/Donut.vue'
 
@@ -11,16 +11,24 @@ const query = ref('')
 const onlyVisible = ref(false)
 const viewMode = ref<'stack' | 'list'>('stack')
 
-onMounted(async () => {
+async function load() {
   if (!props.device) { error.value = '未连接设备'; loading.value = false; return }
+  // 保留旧数据，只标转载中——素模式: 刷新不闪屏
+  const hadData = layers.value !== null
+  if (!hadData) loading.value = true
   try {
     layers.value = await props.device.system.layers()
+    error.value = null
   } catch (err) {
     error.value = (err as Error).message
   } finally {
     loading.value = false
   }
-})
+}
+
+onMounted(load)
+const tick = inject<Ref<number>>('inspector:refreshTick')
+if (tick) watch(tick, load)
 
 const filtered = computed(() => {
   if (!layers.value) return []

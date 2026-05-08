@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
 import type { DeviceAPI, ProcessInfo } from '@/device'
 import Treemap from '../components/Treemap.vue'
 
@@ -12,16 +12,21 @@ const sortBy = ref<'rss' | 'vsz' | 'pid' | 'name'>('rss')
 const selected = ref<string | null>(null)
 const viewMode = ref<'treemap' | 'list'>('treemap')
 
-onMounted(async () => {
+async function load() {
   if (!props.device) { error.value = '未连接设备'; loading.value = false; return }
   try {
     procs.value = await props.device.system.processes()
+    error.value = null
   } catch (err) {
     error.value = (err as Error).message
   } finally {
     loading.value = false
   }
-})
+}
+
+onMounted(load)
+const tick = inject<Ref<number>>('inspector:refreshTick')
+if (tick) watch(tick, load)
 
 const visible = computed(() => {
   const q = query.value.toLowerCase().trim()

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed, watch, inject, type Ref } from 'vue'
 import type { DeviceAPI, NetworkInfo } from '@/device'
 import Sparkline from '../components/Sparkline.vue'
 
@@ -68,6 +68,13 @@ onMounted(async () => {
   timer = window.setInterval(loadTraffic, 2000) as unknown as number
 })
 onBeforeUnmount(() => { if (timer) clearInterval(timer) })
+
+const tick = inject<Ref<number>>('inspector:refreshTick')
+if (tick) watch(tick, async () => {
+  if (!props.device) return
+  try { info.value = await props.device.system.network() } catch (err) { error.value = (err as Error).message }
+  await loadTraffic()
+})
 
 function fmtBytes(b: number): string {
   if (b > 1024 ** 3) return (b / 1024 ** 3).toFixed(2) + ' GB'
