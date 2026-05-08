@@ -5,7 +5,6 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import { useDevice, useWindow } from '@/composables'
-import type { SpawnedProcess } from '@/device'
 
 const { window: win } = useWindow()
 const device = useDevice()
@@ -15,8 +14,16 @@ const statusRef = ref('')
 
 let term: Terminal | null = null
 let fit: FitAddon | null = null
-let proc: SpawnedProcess | null = null
+let pty: {
+  input: WritableStream<Uint8Array>
+  output: ReadableStream<Uint8Array>
+  exited: Promise<number>
+  resize: (rows: number, cols: number) => Promise<void>
+  sigint: () => Promise<void>
+  kill: () => Promise<void> | void
+} | null = null
 let stdinWriter: WritableStreamDefaultWriter<Uint8Array> | null = null
+let outputReader: ReadableStreamDefaultReader<Uint8Array> | null = null
 let resizeObserver: ResizeObserver | null = null
 let disposed = false
 
@@ -25,39 +32,45 @@ async function start() {
     statusRef.value = '未连接设备'
     return
   }
-  statusRef.value = '启动 shell…'
+  statusRef.value = '启动 PTY…'
   try {
-    proc = await device.value.shell.spawn('sh')
-    stdinWriter = proc.stdin.getWriter()
+    // 拿到底层 adb，走 shellProtocol.pty（真 TTY）
+    const d = device.value as unknown as { conn: { adb: any } }
+    const sp = d.conn.adb.subprocess.shellProtocol
+    if (!sp) {
+      statusRef.value = '当前 adb 不支持 shell protocol（设备太老？）'
+      return
+    }
 
-    // stdout
+    const ptyProc = await sp.pty({ terminalType: 'xterm-256color' })
+    pty = ptyProc as any
+    stdinWriter = (ptyProc.input as unknown as WritableStream<Uint8Array>).getWriter()
+
+    // 先同步一次终端尺寸到 pty（避免 shell 按默认 80x24 出奇怪布局）
+    if (term) {
+      try { await ptyProc.resize(term.rows, term.cols) } catch {}
+    }
+
+    // stdout 循环（pty 合并 stdout/stderr 到 output）
     ;(async () => {
-      const reader = proc!.stdout.getReader()
+      const reader = (ptyProc.output as unknown as ReadableStream<Uint8Array>).getReader()
+      outputReader = reader
       for (;;) {
         const { done, value } = await reader.read()
         if (done || disposed) break
         if (value) term?.write(value)
       }
-    })().catch((err) => console.error('[terminal] stdout', err))
+    })().catch((err) => console.error('[terminal] output', err))
 
-    // stderr
-    ;(async () => {
-      const reader = proc!.stderr.getReader()
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done || disposed) break
-        if (value) term?.write(value)
-      }
-    })().catch((err) => console.error('[terminal] stderr', err))
-
-    proc.exit.then((code) => {
+    ptyProc.exited.then((code: number) => {
       if (disposed) return
-      term?.writeln(`\r\n\x1b[90m[process exited: ${code}]\x1b[0m`)
+      term?.writeln(`\r\n\x1b[90m[pty exited: ${code}]\x1b[0m`)
     })
 
     statusRef.value = ''
   } catch (err) {
     statusRef.value = (err as Error).message
+    console.error('[terminal] start failed', err)
   }
 }
 
@@ -70,15 +83,27 @@ async function sendInput(data: string) {
   }
 }
 
+async function resizeToTerm() {
+  if (!term || !pty) return
+  try {
+    fit?.fit()
+    await pty.resize(term.rows, term.cols)
+  } catch {}
+}
+
 async function teardown() {
   disposed = true
   if (stdinWriter) {
     try { await stdinWriter.close() } catch {}
     stdinWriter = null
   }
-  if (proc) {
-    try { await proc.kill() } catch {}
-    proc = null
+  if (outputReader) {
+    try { outputReader.cancel() } catch {}
+    outputReader = null
+  }
+  if (pty) {
+    try { await pty.kill() } catch {}
+    pty = null
   }
   term?.dispose()
   term = null
@@ -100,8 +125,9 @@ onMounted(async () => {
       cursor: '#63a3ff',
       selectionBackground: 'rgba(99,163,255,0.3)',
     },
-    convertEol: true,
+    convertEol: false, // pty 自己发 \r\n
     cursorBlink: true,
+    allowProposedApi: true,
   })
   fit = new FitAddon()
   term.loadAddon(fit)
@@ -110,10 +136,11 @@ onMounted(async () => {
   fit.fit()
 
   term.onData(sendInput)
-
-  resizeObserver = new ResizeObserver(() => {
-    try { fit?.fit() } catch {}
+  term.onResize(() => {
+    if (pty) pty.resize(term!.rows, term!.cols).catch(() => {})
   })
+
+  resizeObserver = new ResizeObserver(() => { resizeToTerm() })
   resizeObserver.observe(hostRef.value)
 
   await start()
@@ -122,15 +149,19 @@ onMounted(async () => {
 onBeforeUnmount(() => { teardown() })
 
 // 切换设备时重启 shell
-watch(() => win.value.deviceId, async (_n, _o) => {
+watch(() => win.value.deviceId, async () => {
   disposed = false
   if (stdinWriter) {
     try { await stdinWriter.close() } catch {}
     stdinWriter = null
   }
-  if (proc) {
-    try { await proc.kill() } catch {}
-    proc = null
+  if (outputReader) {
+    try { outputReader.cancel() } catch {}
+    outputReader = null
+  }
+  if (pty) {
+    try { await pty.kill() } catch {}
+    pty = null
   }
   term?.reset()
   await start()
