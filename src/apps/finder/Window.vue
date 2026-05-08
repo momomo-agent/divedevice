@@ -56,9 +56,29 @@ const shortcuts = [
 const loading = ref(false)
 const error = ref<string | null>(null)
 const entries = ref<FileEntry[]>([])
-const selected = ref<string | null>(null)
+const selection = ref<Set<string>>(new Set())
+const lastClicked = ref<string | null>(null) // shift 范围选择的锚点
+
+// Legacy 单选指针（兼容旧逻辑/controller）
+const selected = computed({
+  get: () => {
+    if (selection.value.size !== 1) return null
+    return selection.value.values().next().value ?? null
+  },
+  set: (v: string | null) => {
+    selection.value = new Set(v ? [v] : [])
+    lastClicked.value = v
+  },
+})
 
 const searchQ = ref('')
+const showHidden = ref(false)
+const sortKey = ref<'name' | 'size' | 'mtime' | 'kind'>('name')
+const sortDir = ref<1 | -1>(1)
+
+// ---- Clipboard ( 模仿 macOS 的 cut/copy + paste, 跨目录移动/复制 ) ----
+type ClipboardMode = 'copy' | 'cut'
+const clipboard = ref<{ mode: ClipboardMode; paths: string[] } | null>(null)
 
 async function load() {
   if (!device.value) {
@@ -70,7 +90,9 @@ async function load() {
   error.value = null
   try {
     entries.value = await device.value.fs.ls(path.value)
-    selected.value = null
+    selection.value = new Set()
+    lastClicked.value = null
+    await refreshDiskUsage()
   } catch (err) {
     error.value = (err as Error).message
     entries.value = []
@@ -81,12 +103,28 @@ async function load() {
 
 const visible = computed(() => {
   const q = searchQ.value.toLowerCase().trim()
-  const list = q
+  let list = q
     ? entries.value.filter((e) => e.name.toLowerCase().includes(q))
-    : entries.value
-  return [...list].sort((a, b) => {
-    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
-    return a.name.localeCompare(b.name)
+    : entries.value.slice()
+  if (!showHidden.value) list = list.filter((e) => !e.name.startsWith('.'))
+
+  const dir = sortDir.value
+  const byKind = (a: FileEntry, b: FileEntry) => (a.isDir === b.isDir ? 0 : (a.isDir ? -1 : 1))
+  const cmp: Record<typeof sortKey.value, (a: FileEntry, b: FileEntry) => number> = {
+    name: (a, b) => a.name.localeCompare(b.name),
+    size: (a, b) => (a.size || 0) - (b.size || 0),
+    mtime: (a, b) => (a.mtime || 0) - (b.mtime || 0),
+    kind: (a, b) => {
+      const ka = a.name.toLowerCase().split('.').pop() ?? ''
+      const kb = b.name.toLowerCase().split('.').pop() ?? ''
+      return ka.localeCompare(kb)
+    },
+  }
+  return list.sort((a, b) => {
+    // 目录永远在前（同 Finder）
+    const dk = byKind(a, b)
+    if (dk !== 0) return dk
+    return cmp[sortKey.value](a, b) * dir
   })
 })
 
@@ -108,7 +146,11 @@ useAppController({
     view: view.value,
     search: searchQ.value,
     selected: selected.value,
+    selection: [...selection.value],
     entryCount: entries.value.length,
+    showHidden: showHidden.value,
+    sort: { key: sortKey.value, dir: sortDir.value },
+    clipboard: clipboard.value,
   }),
   describe: () => ({
     events: [
@@ -121,8 +163,17 @@ useAppController({
       { name: 'refresh', description: 'Reload current dir' },
       { name: 'newFolder', description: 'Create a new folder in current dir (auto-named, enters rename mode)' },
       { name: 'rename', description: 'Rename a file/dir. payload: {from: string, to: string}' },
-      { name: 'delete', description: 'Delete a path. payload: {path: string}' },
+      { name: 'delete', description: 'Delete path(s). payload: {path?: string, paths?: string[]}' },
       { name: 'download', description: 'Download a file/dir to user’s machine. payload: {path: string}' },
+      { name: 'setSort', description: 'Change sort. payload: {key: "name"|"size"|"mtime"|"kind", dir?: 1|-1}' },
+      { name: 'toggleHidden', description: 'Toggle hidden files (dotfiles)' },
+      { name: 'selectAll', description: 'Select all visible entries' },
+      { name: 'clearSelection', description: 'Clear selection' },
+      { name: 'copy', description: 'Clipboard copy. payload: {paths: string[]}' },
+      { name: 'cut', description: 'Clipboard cut. payload: {paths: string[]}' },
+      { name: 'paste', description: 'Paste clipboard into current dir (or payload.toDir)' },
+      { name: 'move', description: 'Move paths to directory. payload: {paths: string[], toDir: string}' },
+      { name: 'copyTo', description: 'Copy paths to directory. payload: {paths: string[], toDir: string}' },
     ],
   }),
   async send(event, payload) {
@@ -164,8 +215,17 @@ useAppController({
         return { ok: true, from, to }
       }
       case 'delete': {
+        const arr = Array.isArray(p.paths) ? (p.paths as string[]) : null
+        if (arr && arr.length) {
+          for (const pth of arr) {
+            const st = await device.value!.fs.stat(pth)
+            await device.value!.fs.rm(pth, st?.isDir ?? false)
+          }
+          await load()
+          return { ok: true, deletedCount: arr.length }
+        }
         const target = String(p.path ?? '')
-        if (!target) throw new Error('delete requires payload.path')
+        if (!target) throw new Error('delete requires payload.path or payload.paths')
         const st = await device.value!.fs.stat(target)
         await device.value!.fs.rm(target, st?.isDir ?? false)
         await load()
@@ -178,6 +238,56 @@ useAppController({
         if (!st) throw new Error('path not found')
         await downloadEntry(st)
         return { ok: true, path: target }
+      }
+      case 'setSort': {
+        const k = String(p.key ?? '') as typeof sortKey.value
+        if (!['name', 'size', 'mtime', 'kind'].includes(k)) throw new Error('invalid sort key')
+        sortKey.value = k
+        if (p.dir === 1 || p.dir === -1) sortDir.value = p.dir
+        return { ok: true, sort: { key: sortKey.value, dir: sortDir.value } }
+      }
+      case 'toggleHidden': {
+        showHidden.value = !showHidden.value
+        return { ok: true, showHidden: showHidden.value }
+      }
+      case 'selectAll': {
+        selection.value = new Set(visible.value.map((e) => e.path))
+        return { ok: true, count: selection.value.size }
+      }
+      case 'clearSelection': {
+        selection.value = new Set()
+        return { ok: true }
+      }
+      case 'copy': {
+        const paths = (Array.isArray(p.paths) ? p.paths : []) as string[]
+        if (!paths.length) throw new Error('copy requires payload.paths')
+        clipboard.value = { mode: 'copy', paths: [...paths] }
+        return { ok: true, clipboard: clipboard.value }
+      }
+      case 'cut': {
+        const paths = (Array.isArray(p.paths) ? p.paths : []) as string[]
+        if (!paths.length) throw new Error('cut requires payload.paths')
+        clipboard.value = { mode: 'cut', paths: [...paths] }
+        return { ok: true, clipboard: clipboard.value }
+      }
+      case 'paste': {
+        const toDir = String(p.toDir ?? path.value)
+        const res = await pasteFromClipboard(toDir)
+        return { ok: true, ...res }
+      }
+      case 'move': {
+        const paths = (Array.isArray(p.paths) ? p.paths : []) as string[]
+        const toDir = String(p.toDir ?? '')
+        if (!paths.length || !toDir) throw new Error('move requires payload.paths + payload.toDir')
+        await movePaths(paths, toDir)
+        return { ok: true, count: paths.length, toDir }
+      }
+      case 'copyTo': {
+        const paths = (Array.isArray(p.paths) ? p.paths : []) as string[]
+        const toDir = String(p.toDir ?? '')
+        if (!paths.length || !toDir) throw new Error('copyTo requires payload.paths + payload.toDir')
+        await copyPaths(paths, toDir)
+        return { ok: true, count: paths.length, toDir }
       }
       default: throw new Error(`Unknown finder event: ${event}`)
     }
@@ -295,6 +405,45 @@ function fmtTime(ts: number | undefined): string {
   if (!ts) return '—'
   return new Date(ts * 1000).toLocaleString()
 }
+function fmtMode(m?: number): string {
+  if (!m) return '—'
+  const bits = [
+    (m & 0o400) ? 'r' : '-',
+    (m & 0o200) ? 'w' : '-',
+    (m & 0o100) ? 'x' : '-',
+    (m & 0o040) ? 'r' : '-',
+    (m & 0o020) ? 'w' : '-',
+    (m & 0o010) ? 'x' : '-',
+    (m & 0o004) ? 'r' : '-',
+    (m & 0o002) ? 'w' : '-',
+    (m & 0o001) ? 'x' : '-',
+  ].join('')
+  return `${bits} (${(m & 0o777).toString(8)})`
+}
+const selectionTotalSize = computed(() => {
+  let total = 0
+  for (const p of selection.value) {
+    const e = entries.value.find((x) => x.path === p)
+    if (e && !e.isDir) total += e.size || 0
+  }
+  return total
+})
+const selectionFileCount = computed(() => {
+  let n = 0
+  for (const p of selection.value) {
+    const e = entries.value.find((x) => x.path === p)
+    if (e && !e.isDir) n++
+  }
+  return n
+})
+const selectionDirCount = computed(() => {
+  let n = 0
+  for (const p of selection.value) {
+    const e = entries.value.find((x) => x.path === p)
+    if (e && e.isDir) n++
+  }
+  return n
+})
 function iconOf(e: FileEntry) {
   if (e.isDir) return '📁'
   if (isImage(e.name)) return '🖼'
@@ -375,14 +524,206 @@ function startRename(e: FileEntry) {
 
 // Delete
 async function deleteSelected() {
-  if (!selected.value || !device.value) return
-  const target = entries.value.find((e) => e.path === selected.value)
-  if (!target) return
-  if (!confirm(`确定删除 ${target.name}${target.isDir ? '（整个目录）' : ''}？`)) return
-  await withBusy(`删除 ${target.name}…`, async () => {
-    await device.value!.fs.rm(target.path, target.isDir)
+  if (!device.value) return
+  const paths = [...selection.value]
+  if (!paths.length) return
+  const entriesById = new Map(entries.value.map((e) => [e.path, e] as const))
+  const label = paths.length === 1
+    ? (entriesById.get(paths[0])?.name ?? paths[0])
+    : `${paths.length} 个项目`
+  const hasDir = paths.some((p) => entriesById.get(p)?.isDir)
+  if (!confirm(`确定删除 ${label}${hasDir ? '（包含目录）' : ''}？`)) return
+  await withBusy(`删除 ${label}…`, async () => {
+    for (const pth of paths) {
+      const st = entriesById.get(pth)
+      await device.value!.fs.rm(pth, st?.isDir ?? false)
+    }
     await load()
   }).catch((err) => chat.push('system', `删除失败: ${(err as Error).message}`))
+}
+
+// Clipboard + move/copy
+async function pasteFromClipboard(toDir: string) {
+  if (!clipboard.value || !device.value) return { moved: 0, copied: 0 }
+  const { mode, paths } = clipboard.value
+  if (mode === 'cut') {
+    await movePaths(paths, toDir)
+    clipboard.value = null
+    return { moved: paths.length, copied: 0 }
+  } else {
+    await copyPaths(paths, toDir)
+    return { moved: 0, copied: paths.length }
+  }
+}
+
+async function movePaths(paths: string[], toDir: string) {
+  if (!device.value) return
+  await withBusy(`移动 ${paths.length} 项…`, async () => {
+    for (const from of paths) {
+      const name = from.split('/').pop() ?? from
+      let dest = joinPath(toDir, name)
+      // 避免触发 self-overwrite
+      if (dest === from) continue
+      // 冲突时自动缀名
+      try {
+        const existing = await device.value!.fs.stat(dest)
+        if (existing) dest = uniqueify(dest)
+      } catch { /* ignore */ }
+      await device.value!.fs.rename(from, dest)
+    }
+    await load()
+  }).catch((err) => chat.push('system', `移动失败: ${(err as Error).message}`))
+}
+
+async function copyPaths(paths: string[], toDir: string) {
+  if (!device.value) return
+  await withBusy(`复制 ${paths.length} 项…`, async () => {
+    for (const from of paths) {
+      const name = from.split('/').pop() ?? from
+      let dest = joinPath(toDir, name)
+      if (dest === from) dest = uniqueify(dest)
+      try {
+        const existing = await device.value!.fs.stat(dest)
+        if (existing) dest = uniqueify(dest)
+      } catch { /* ignore */ }
+      await device.value!.fs.copy(from, dest)
+    }
+    await load()
+  }).catch((err) => chat.push('system', `复制失败: ${(err as Error).message}`))
+}
+
+function uniqueify(p: string): string {
+  // foo.txt → foo 2.txt
+  const slash = p.lastIndexOf('/')
+  const dir = p.substring(0, slash)
+  const name = p.substring(slash + 1)
+  const dot = name.lastIndexOf('.')
+  const stem = dot > 0 ? name.substring(0, dot) : name
+  const ext = dot > 0 ? name.substring(dot) : ''
+  for (let i = 2; i < 1000; i++) {
+    const cand = `${dir}/${stem} ${i}${ext}`
+    // 纯字符串不简 stat（封装失败再说）
+    return cand
+  }
+  return `${p}.${Date.now()}`
+}
+
+function doCopyClipboard() {
+  if (selection.value.size === 0) return
+  clipboard.value = { mode: 'copy', paths: [...selection.value] }
+}
+function doCutClipboard() {
+  if (selection.value.size === 0) return
+  clipboard.value = { mode: 'cut', paths: [...selection.value] }
+}
+async function doPaste() {
+  await pasteFromClipboard(path.value)
+}
+
+// Selection helpers
+function onRowClick(ev: MouseEvent, e: FileEntry) {
+  const isMulti = ev.metaKey || ev.ctrlKey
+  const isRange = ev.shiftKey
+  if (isMulti) {
+    if (selection.value.has(e.path)) selection.value.delete(e.path)
+    else selection.value.add(e.path)
+    selection.value = new Set(selection.value)
+    lastClicked.value = e.path
+  } else if (isRange && lastClicked.value) {
+    const list = visible.value
+    const iA = list.findIndex((x) => x.path === lastClicked.value)
+    const iB = list.findIndex((x) => x.path === e.path)
+    if (iA >= 0 && iB >= 0) {
+      const [lo, hi] = iA < iB ? [iA, iB] : [iB, iA]
+      const next = new Set(selection.value)
+      for (let i = lo; i <= hi; i++) next.add(list[i].path)
+      selection.value = next
+    }
+  } else {
+    selection.value = new Set([e.path])
+    lastClicked.value = e.path
+  }
+}
+function selectAllVisible() {
+  selection.value = new Set(visible.value.map((e) => e.path))
+}
+
+function toggleSort(key: 'name' | 'size' | 'mtime' | 'kind') {
+  if (sortKey.value === key) sortDir.value = (sortDir.value === 1 ? -1 : 1) as 1 | -1
+  else { sortKey.value = key; sortDir.value = 1 }
+}
+function sortArrow(key: string) {
+  if (sortKey.value !== key) return ''
+  return sortDir.value === 1 ? '↑' : '↓'
+}
+
+// ---- Disk usage
+const disk = ref<{ totalBytes: number; usedBytes: number; availBytes: number } | null>(null)
+async function refreshDiskUsage() {
+  if (!device.value) { disk.value = null; return }
+  try { disk.value = await device.value.fs.diskUsage(path.value) } catch { disk.value = null }
+}
+
+// ---- Info panel (side pane, single selection) ----
+const showInfo = ref(false)
+const infoDirSize = ref<number | null>(null)
+let infoDirSizePath: string | null = null
+async function computeDirSizeLazy() {
+  if (!showInfo.value || !selected.value || !device.value) return
+  const e = entries.value.find((x) => x.path === selected.value)
+  if (!e || !e.isDir) { infoDirSize.value = null; return }
+  if (infoDirSizePath === e.path && infoDirSize.value !== null) return
+  infoDirSizePath = e.path
+  infoDirSize.value = null // mark loading
+  try {
+    infoDirSize.value = await device.value.fs.dirSize(e.path)
+  } catch { infoDirSize.value = null }
+}
+watch([selected, showInfo], () => { computeDirSizeLazy() })
+
+// Path bar edit mode
+const pathEditing = ref(false)
+const pathEditValue = ref('')
+function startPathEdit() {
+  pathEditValue.value = path.value
+  pathEditing.value = true
+}
+function commitPathEdit() {
+  if (!pathEditing.value) return
+  pathEditing.value = false
+  const v = pathEditValue.value.trim()
+  if (v && v !== path.value) path.value = v
+}
+function cancelPathEdit() { pathEditing.value = false }
+
+function startRenameSelected() {
+  if (selection.value.size !== 1) return
+  const p = selection.value.values().next().value!
+  const e = entries.value.find((x) => x.path === p)
+  if (e) startRename(e)
+}
+
+// 全局快捷键（仅窗口聚焦时）
+function onMainKey(ev: KeyboardEvent) {
+  if (ev.isComposing || ev.keyCode === 229) return
+  const mod = ev.metaKey || ev.ctrlKey
+  if (mod && ev.key === 'a') { ev.preventDefault(); selectAllVisible(); return }
+  if (mod && ev.key === 'c') { ev.preventDefault(); doCopyClipboard(); return }
+  if (mod && ev.key === 'x') { ev.preventDefault(); doCutClipboard(); return }
+  if (mod && ev.key === 'v') { ev.preventDefault(); doPaste(); return }
+  if (mod && ev.key === 'i') { ev.preventDefault(); showInfo.value = !showInfo.value; return }
+  if (mod && ev.key === 'l') { ev.preventDefault(); startPathEdit(); return }
+  if (mod && ev.key === '.') { ev.preventDefault(); showHidden.value = !showHidden.value; return }
+  if (mod && ev.key === 'r') { ev.preventDefault(); load(); return }
+  if (!mod && ev.key === 'F2') { ev.preventDefault(); startRenameSelected(); return }
+  if (!mod && ev.key === 'Delete') { ev.preventDefault(); deleteSelected(); return }
+  if (!mod && ev.key === 'Backspace') { ev.preventDefault(); deleteSelected(); return }
+  if (!mod && ev.key === 'Enter') {
+    const p = [...selection.value][0]
+    const e = p ? entries.value.find((x) => x.path === p) : null
+    if (e) { ev.preventDefault(); onEnter(e) }
+    return
+  }
 }
 
 // Download selected (or specific entry) to user's machine via <a download>
@@ -423,6 +764,38 @@ function triggerDownload(blob: Blob, filename: string) {
   a.click()
   a.remove()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+// 多选下载：打包成一个 tar
+async function downloadSelection() {
+  const paths = [...selection.value]
+  if (!paths.length || !device.value) return
+  if (paths.length === 1) {
+    const e = entries.value.find((x) => x.path === paths[0])
+    if (e) await downloadEntry(e)
+    return
+  }
+  // 所有项在同一分区下才能用单条 tar
+  const parent = paths[0].substring(0, paths[0].lastIndexOf('/')) || '/'
+  const names = paths.map((p) => p.substring(p.lastIndexOf('/') + 1))
+  const quoted = names.map((n) => `"${n.replace(/"/g, '\\"')}"`).join(' ')
+  await withBusy(`打包 ${paths.length} 项…`, async () => {
+    const proc = await device.value!.shell.spawn(`tar -cf - -C "${parent}" ${quoted}`)
+    const chunks: Uint8Array[] = []
+    // @ts-expect-error stream compat
+    const reader = (proc.output as ReadableStream<Uint8Array>).getReader()
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      if (value) chunks.push(value)
+    }
+    let total = 0
+    for (const c of chunks) total += c.byteLength
+    const buf = new Uint8Array(total)
+    let off = 0
+    for (const c of chunks) { buf.set(c, off); off += c.byteLength }
+    triggerDownload(new Blob([buf], { type: 'application/x-tar' }), `download-${paths.length}items.tar`)
+  }).catch((err) => chat.push('system', `下载失败: ${(err as Error).message}`))
 }
 
 // ---- Upload via drag&drop or file picker ----
@@ -606,30 +979,53 @@ function closeContextMenu() { contextMenu.value = null }
         <button :class="{ active: view === 'list' }" @click="view = 'list'" title="列表视图">≡</button>
         <button :class="{ active: view === 'columns' }" @click="view = 'columns'" title="列视图">‖‖</button>
       </div>
-      <div class="crumbs">
+      <div class="crumbs" v-if="!pathEditing">
         <template v-for="(c, i) in crumbs" :key="c.path">
           <button class="crumb" @click="path = c.path">{{ c.name === '/' ? '根目录' : c.name }}</button>
           <span v-if="i < crumbs.length - 1" class="sep">›</span>
         </template>
+        <button class="crumb-edit" @click="startPathEdit" title="直接输入路径 \u2318L">✎</button>
       </div>
+      <input
+        v-else
+        class="path-input"
+        v-model="pathEditValue"
+        v-focus
+        @keydown.enter.prevent="commitPathEdit"
+        @keydown.escape.prevent="cancelPathEdit"
+        @blur="commitPathEdit"
+      />
       <input v-model="searchQ" class="search" placeholder="搜索当前目录…" />
-      <button class="icon-btn" @click="newFolder" title="新建文件夹 (N)">➕</button>
-      <button
-        class="icon-btn"
-        :disabled="!selected"
-        @click="() => { const e = entries.find(x => x.path === selected); if (e) startRename(e) }"
-        title="重命名 (F2)"
-      >✏️</button>
-      <button
-        class="icon-btn"
-        :disabled="!selected"
-        @click="() => { const e = entries.find(x => x.path === selected); if (e) downloadEntry(e) }"
-        title="下载到本地"
-      >⬇️</button>
-      <button class="icon-btn" @click="() => fileInputRef?.click()" title="上传文件">⬆️</button>
-      <button class="icon-btn" :disabled="!selected" @click="deleteSelected" title="删除 (Del)">🗑</button>
+      <div class="tb-group">
+        <button class="icon-btn" @click="newFolder" title="新建文件夹">➕</button>
+        <button class="icon-btn" :disabled="selection.size !== 1" @click="startRenameSelected" title="重命名 (F2)">✏️</button>
+      </div>
+      <div class="tb-group">
+        <button class="icon-btn" :disabled="!selection.size" @click="doCopyClipboard" title="复制 ⌘C">⎘</button>
+        <button class="icon-btn" :disabled="!selection.size" @click="doCutClipboard" title="剪切 ⌘X">✂</button>
+        <button class="icon-btn" :disabled="!clipboard" @click="doPaste" title="粘贴 ⌘V">📋</button>
+      </div>
+      <div class="tb-group">
+        <button class="icon-btn" :disabled="!selection.size" @click="downloadSelection" title="下载到本地">⬇️</button>
+        <button class="icon-btn" @click="() => fileInputRef?.click()" title="上传文件">⬆️</button>
+        <button class="icon-btn" :disabled="!selection.size" @click="deleteSelected" title="删除 (Del)">🗑</button>
+      </div>
       <input ref="fileInputRef" type="file" multiple style="display:none" @change="onFileInput" />
-      <button class="icon-btn" @click="load" title="刷新">⟳</button>
+      <div class="tb-group">
+        <button
+          class="icon-btn"
+          :class="{ active: showHidden }"
+          @click="showHidden = !showHidden"
+          title="显示隐藏文件 (⌘.)"
+        >☰</button>
+        <button
+          class="icon-btn"
+          :class="{ active: showInfo }"
+          @click="showInfo = !showInfo"
+          title="简介面板 (⌘I)"
+        >ⓘ</button>
+        <button class="icon-btn" @click="load" title="刷新 ⌘R">⟳</button>
+      </div>
     </header>
 
     <div class="body">
@@ -651,29 +1047,28 @@ function closeContextMenu() { contextMenu.value = null }
       <!-- ================= Main panel ================= -->
       <main
         class="content"
-        :class="{ 'drag-hover': dragHover }"
+        :class="{ 'drag-hover': dragHover, 'with-info': showInfo }"
         @dragenter="onDragEnter"
         @dragover="onDragOver"
         @dragleave="onDragLeave"
         @drop="onDrop"
-        @keydown.f2.prevent="() => { const e = entries.find(x => x.path === selected); if (e) startRename(e) }"
-        @keydown.delete.prevent="deleteSelected"
+        @keydown="onMainKey"
         tabindex="0"
       >
         <div v-if="error" class="error">{{ error }}</div>
         <div v-else-if="loading && view !== 'columns'" class="center">加载中…</div>
 
         <!-- Icons -->
-        <div v-else-if="view === 'icons'" class="icons" @click.self="selected = null">
+        <div v-else-if="view === 'icons'" class="icons" @click.self="selection = new Set()">
           <div
             v-for="e in visible"
             :key="e.path"
             class="tile"
-            :class="{ selected: selected === e.path }"
+            :class="{ selected: selection.has(e.path), 'clip-cut': clipboard?.mode === 'cut' && clipboard.paths.includes(e.path) }"
             tabindex="0"
-            @click.stop="selected = e.path"
+            @click.stop="onRowClick($event, e)"
             @dblclick="onEnter(e)"
-            @contextmenu.prevent="(ev) => { selected = e.path; openContextMenu(ev, e) }"
+            @contextmenu.prevent="(ev) => { if (!selection.has(e.path)) selection = new Set([e.path]); openContextMenu(ev, e) }"
           >
             <div class="tile-icon">{{ iconOf(e) }}</div>
             <input
@@ -694,18 +1089,19 @@ function closeContextMenu() { contextMenu.value = null }
         <!-- List -->
         <div v-else-if="view === 'list'" class="list">
           <div class="list-header">
-            <div class="col name">名称</div>
-            <div class="col size">大小</div>
-            <div class="col mtime">修改时间</div>
+            <button class="col name sortable" @click="toggleSort('name')">名称 {{ sortArrow('name') }}</button>
+            <button class="col size sortable" @click="toggleSort('size')">大小 {{ sortArrow('size') }}</button>
+            <button class="col kind sortable" @click="toggleSort('kind')">类型 {{ sortArrow('kind') }}</button>
+            <button class="col mtime sortable" @click="toggleSort('mtime')">修改时间 {{ sortArrow('mtime') }}</button>
           </div>
           <div
             v-for="e in visible"
             :key="e.path"
             class="list-row"
-            :class="{ selected: selected === e.path }"
-            @click="selected = e.path"
+            :class="{ selected: selection.has(e.path), 'clip-cut': clipboard?.mode === 'cut' && clipboard.paths.includes(e.path) }"
+            @click="onRowClick($event, e)"
             @dblclick="onEnter(e)"
-            @contextmenu.prevent="(ev) => { selected = e.path; openContextMenu(ev, e) }"
+            @contextmenu.prevent="(ev) => { if (!selection.has(e.path)) selection = new Set([e.path]); openContextMenu(ev, e) }"
           >
             <div class="col name">
               <span class="icon">{{ iconOf(e) }}</span>
@@ -722,6 +1118,7 @@ function closeContextMenu() { contextMenu.value = null }
               <span v-else class="label">{{ e.name }}</span>
             </div>
             <div class="col size">{{ e.isDir ? '—' : fmtSize(e.size) }}</div>
+            <div class="col kind">{{ e.isDir ? '文件夹' : (e.name.split('.').pop()?.toUpperCase() || '文件') }}</div>
             <div class="col mtime">{{ fmtTime(e.mtime) }}</div>
           </div>
           <div v-if="!visible.length" class="center muted">空目录</div>
@@ -746,6 +1143,55 @@ function closeContextMenu() { contextMenu.value = null }
           </div>
         </div>
       </main>
+
+      <!-- ================= Info panel ================= -->
+      <aside v-if="showInfo" class="info-panel">
+        <template v-if="selection.size === 0">
+          <div class="ip-empty">未选中任何项</div>
+        </template>
+        <template v-else-if="selection.size > 1">
+          <div class="ip-title">{{ selection.size }} 个项目</div>
+          <div class="ip-row">
+            <span>总大小</span>
+            <b>{{ fmtSize(selectionTotalSize) }}</b>
+          </div>
+          <div class="ip-row">
+            <span>文件</span>
+            <b>{{ selectionFileCount }}</b>
+          </div>
+          <div class="ip-row">
+            <span>文件夹</span>
+            <b>{{ selectionDirCount }}</b>
+          </div>
+        </template>
+        <template v-else>
+          <div class="ip-icon">{{ iconOf(entries.find(e => e.path === selected)!) }}</div>
+          <div class="ip-name">{{ selected?.split('/').pop() }}</div>
+          <div class="ip-path">{{ selected }}</div>
+          <div class="ip-row">
+            <span>类型</span>
+            <b>{{ entries.find(e => e.path === selected)?.isDir ? '文件夹' : ((selected?.split('.').pop() || '').toUpperCase() || '文件') }}</b>
+          </div>
+          <div class="ip-row">
+            <span>大小</span>
+            <b>
+              <template v-if="entries.find(e => e.path === selected)?.isDir">
+                <template v-if="infoDirSize === null">计算中…</template>
+                <template v-else>{{ fmtSize(infoDirSize) }}</template>
+              </template>
+              <template v-else>{{ fmtSize(entries.find(e => e.path === selected)?.size ?? 0) }}</template>
+            </b>
+          </div>
+          <div class="ip-row">
+            <span>修改</span>
+            <b>{{ fmtTime(entries.find(e => e.path === selected)?.mtime) }}</b>
+          </div>
+          <div class="ip-row">
+            <span>权限</span>
+            <b>{{ fmtMode(entries.find(e => e.path === selected)?.mode) }}</b>
+          </div>
+        </template>
+      </aside>
     </div>
 
     <!-- ================= Transfer progress ================= -->
@@ -777,19 +1223,32 @@ function closeContextMenu() { contextMenu.value = null }
       :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }"
       @click.stop
     >
-      <button @click="onEnter(contextMenu.entry); closeContextMenu()">打开</button>
-      <button @click="startRename(contextMenu.entry); closeContextMenu()">重命名</button>
-      <button @click="downloadEntry(contextMenu.entry); closeContextMenu()">下载到本地</button>
+      <div class="ctx-title" v-if="selection.size > 1">{{ selection.size }} 个项目</div>
+      <button v-if="selection.size === 1" @click="onEnter(contextMenu.entry); closeContextMenu()">打开</button>
+      <button v-if="selection.size === 1" @click="startRename(contextMenu.entry); closeContextMenu()">重命名</button>
+      <button @click="downloadSelection(); closeContextMenu()">下载到本地</button>
       <div class="ctx-sep"></div>
-      <button class="danger" @click="selected = contextMenu.entry.path; deleteSelected(); closeContextMenu()">删除</button>
+      <button @click="doCopyClipboard(); closeContextMenu()">复制</button>
+      <button @click="doCutClipboard(); closeContextMenu()">剪切</button>
+      <button :disabled="!clipboard" @click="doPaste(); closeContextMenu()">粘贴</button>
+      <div class="ctx-sep"></div>
+      <button class="danger" @click="deleteSelected(); closeContextMenu()">删除</button>
     </div>
     <div v-if="contextMenu" class="ctx-backdrop" @click="closeContextMenu" @contextmenu.prevent="closeContextMenu" />
 
     <!-- ================= Status bar ================= -->
     <footer class="statusbar">
-      <span>{{ visible.length }} 项</span>
+      <span>{{ visible.length }} 项<span v-if="selection.size"> / 已选 {{ selection.size }}</span></span>
+      <span v-if="clipboard" class="clip-info">
+        📋 {{ clipboard.mode === 'cut' ? '剪切' : '复制' }} {{ clipboard.paths.length }} 项待粘贴
+      </span>
       <span v-if="busy" class="busy">{{ busy }}</span>
-      <span v-if="selected" class="sel">{{ selected.split('/').pop() }}</span>
+      <span v-if="disk" class="disk" :title="`使用 ${fmtSize(disk.usedBytes)} / 总 ${fmtSize(disk.totalBytes)}`">
+        <span class="disk-bar">
+          <span class="disk-fill" :style="{ width: (disk.usedBytes / Math.max(1, disk.totalBytes) * 100) + '%' }" />
+        </span>
+        {{ fmtSize(disk.availBytes) }} 可用
+      </span>
     </footer>
 
     <!-- ================= Image preview overlay ================= -->
@@ -1180,4 +1639,141 @@ function closeContextMenu() { contextMenu.value = null }
 .ctx-sep { height: 1px; background: rgba(255,255,255,0.08); margin: 3px 4px; }
 
 .statusbar .busy { color: #63a3ff; font-size: 11px; }
+
+/* ---------- Toolbar enhancements ---------- */
+.tb-group {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 5px;
+  background: rgba(255,255,255,0.02);
+}
+.icon-btn.active { background: rgba(99,163,255,0.25); color: var(--fg-1); }
+.crumb-edit {
+  background: transparent; border: none;
+  color: var(--fg-3);
+  cursor: pointer; font-size: 11px;
+  padding: 0 4px;
+  opacity: 0.5;
+}
+.crumb-edit:hover { opacity: 1; color: var(--fg-1); }
+.path-input {
+  flex: 1;
+  background: var(--surface-3);
+  color: var(--fg-1);
+  border: 1px solid rgba(99,163,255,0.5);
+  border-radius: 5px;
+  padding: 3px 8px;
+  height: 26px;
+  font-family: ui-monospace, 'SF Mono', monospace;
+  font-size: 12px;
+  outline: none;
+}
+
+/* ---------- List sorting + new kind column ---------- */
+.list-header {
+  display: grid;
+  grid-template-columns: 1fr 110px 90px 170px;
+}
+.list-header .col { padding: 8px 12px; }
+.list-header .sortable {
+  background: transparent;
+  border: none;
+  color: var(--fg-3);
+  text-align: left;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.list-header .sortable:hover { color: var(--fg-1); }
+.list-row {
+  display: grid;
+  grid-template-columns: 1fr 110px 90px 170px;
+}
+.list-row .col.kind { color: var(--fg-3); font-size: 11px; text-transform: lowercase; }
+
+/* ---------- Clipboard cut (ghosted) ---------- */
+.list-row.clip-cut, .tile.clip-cut { opacity: 0.45; }
+.list-row.clip-cut .label, .tile.clip-cut .tile-name { font-style: italic; }
+
+/* ---------- Status bar: disk + clipboard ---------- */
+.statusbar {
+  display: flex; align-items: center; gap: 12px;
+}
+.statusbar .clip-info { color: #63a3ff; font-size: 11px; }
+.statusbar .disk {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.disk-bar {
+  width: 100px; height: 4px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 2px;
+  overflow: hidden;
+  display: inline-block;
+}
+.disk-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #63a3ff, #fbbf24, #f87171);
+  background-size: 200% 100%;
+  display: block;
+}
+
+/* ---------- Info panel ---------- */
+.content.with-info { flex: 1; }
+.info-panel {
+  width: 240px;
+  flex-shrink: 0;
+  border-left: 1px solid rgba(255,255,255,0.06);
+  background: var(--surface-2);
+  padding: 18px 16px;
+  display: flex; flex-direction: column; gap: 10px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+.ip-empty { color: var(--fg-3); text-align: center; padding: 40px 0; }
+.ip-title { font-size: 13px; color: var(--fg-1); font-weight: 600; margin-bottom: 4px; }
+.ip-icon { font-size: 48px; text-align: center; }
+.ip-name {
+  text-align: center;
+  font-weight: 600;
+  color: var(--fg-1);
+  word-break: break-all;
+  line-height: 1.3;
+}
+.ip-path {
+  text-align: center;
+  font-family: ui-monospace, 'SF Mono', monospace;
+  color: var(--fg-3);
+  font-size: 10.5px;
+  word-break: break-all;
+  margin-bottom: 6px;
+}
+.ip-row {
+  display: flex; justify-content: space-between; gap: 10px;
+  padding: 4px 0;
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+.ip-row span { color: var(--fg-3); }
+.ip-row b {
+  color: var(--fg-1);
+  font-weight: 500;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+
+/* ---------- Context menu additions ---------- */
+.ctx-title {
+  padding: 4px 10px;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 500;
+}
+.ctx-menu button:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

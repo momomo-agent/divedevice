@@ -138,6 +138,10 @@ export interface DeviceAPI {
     rename(from: string, to: string): Promise<void>
     /** 复制文件或目录（cp -a） */
     copy(from: string, to: string): Promise<void>
+    /** 目录总大小（字节）；du -s 结果×1024 */
+    dirSize(path: string): Promise<number>
+    /** 简单的磁盘统计（/sdcard 所在分区的 df -k） */
+    diskUsage(path: string): Promise<{ totalBytes: number; usedBytes: number; availBytes: number }>
   }
 
   shell: {
@@ -377,6 +381,27 @@ class AdbDeviceAPI implements DeviceAPI {
       // -a 保留属性 + 递归；-T 避免在目标已存在时作为子目录
       const res = await this.shell.exec(`cp -a ${shellQuote(from)} ${shellQuote(to)}`)
       if (res.exitCode !== 0) throw new Error(res.stderr || `cp failed (exit ${res.exitCode})`)
+    },
+
+    dirSize: async (path: string): Promise<number> => {
+      // du -sk 输出是 KB
+      const { stdout, exitCode } = await this.shell.exec(`du -sk ${shellQuote(path)}`)
+      if (exitCode !== 0) return 0
+      const m = stdout.trim().match(/^(\d+)/)
+      return m ? parseInt(m[1], 10) * 1024 : 0
+    },
+
+    diskUsage: async (path: string) => {
+      const { stdout } = await this.shell.exec(`df -k ${shellQuote(path)}`)
+      // Output: Filesystem 1K-blocks Used Avail Use% Mounted on
+      const lines = stdout.trim().split('\n')
+      const data = lines[lines.length - 1] || ''
+      const cols = data.split(/\s+/)
+      // Android df: <fs> <total> <used> <avail> <use%> <mount>
+      const total = parseInt(cols[1], 10) || 0
+      const used = parseInt(cols[2], 10) || 0
+      const avail = parseInt(cols[3], 10) || 0
+      return { totalBytes: total * 1024, usedBytes: used * 1024, availBytes: avail * 1024 }
     },
   }
 
