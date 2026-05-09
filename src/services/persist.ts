@@ -8,7 +8,7 @@
  *   1. agentic-store.js  → window.AgenticStore
  *   2. agentic.js        → window.Agentic；其内部 load('agentic-store') 会找到 window.AgenticStore
  */
-import { ref, watch, type Ref } from 'vue'
+import { ref, watch, toRaw, isRef, type Ref } from 'vue'
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore — UMD 文件无 .d.ts
 import '../vendor/agentic-store.js'
@@ -33,6 +33,19 @@ interface AgenticGlobal {
 declare global {
   // eslint-disable-next-line no-var
   var Agentic: AgenticGlobal | undefined
+}
+
+/** Deep-unwrap Vue reactive proxies so the value can be passed to structuredClone / IndexedDB. */
+function deepUnwrap(v: unknown): unknown {
+  if (v === null || typeof v !== 'object') return v
+  const raw = isRef(v) ? (v as { value: unknown }).value : toRaw(v)
+  if (raw === null || typeof raw !== 'object') return raw
+  if (Array.isArray(raw)) return raw.map(deepUnwrap)
+  const out: Record<string, unknown> = {}
+  for (const k of Object.keys(raw as Record<string, unknown>)) {
+    out[k] = deepUnwrap((raw as Record<string, unknown>)[k])
+  }
+  return out
 }
 
 // 每个 namespace 一个独立的 Agentic 实例（共享同一个底层 agentic-store backend）
@@ -96,7 +109,7 @@ export function usePersistedState<T>(
     timer = window.setTimeout(async () => {
       try {
         const ai = getAgentic(namespace)
-        await ai.save(key, v as unknown)
+        await ai.save(key, deepUnwrap(v))
       } catch (err) {
         console.warn('[persist]', namespace, key, 'save failed', err)
       }

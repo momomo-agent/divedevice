@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { chat, sendOrQueue, agentState, agentSettings } from '@/services'
 import type { AgentImage } from '@/services/agent'
 import { useComposingLock } from '@/composables'
+import { usePersistedState } from '@/services/persist'
 
 export type ChatPosition = 'left' | 'right' | 'float' | 'hidden'
 
@@ -115,9 +116,113 @@ function closePreview() { previewUrl.value = null }
 
 const floatStyle = computed(() =>
   props.position === 'float'
-    ? { position: 'fixed' as const, right: '40px', bottom: '40px', width: '380px', height: '520px' }
+    ? {
+        position: 'fixed' as const,
+        left: floatFrame.value.x + 'px',
+        top: floatFrame.value.y + 'px',
+        width: floatFrame.value.w + 'px',
+        height: floatFrame.value.h + 'px',
+      }
     : undefined,
 )
+
+// ---------- 悬浮窗的拖动 / resize / 持久化 ----------
+interface FloatFrame { x: number; y: number; w: number; h: number }
+
+const MIN_W = 300
+const MIN_H = 320
+
+function defaultFrame(): FloatFrame {
+  // 默认右下角接近原样式
+  const w = 380, h = 520
+  const x = Math.max(20, (typeof window !== 'undefined' ? window.innerWidth : 1200) - w - 40)
+  const y = Math.max(20, (typeof window !== 'undefined' ? window.innerHeight : 800) - h - 40)
+  return { x, y, w, h }
+}
+
+const { state: floatFrame } = usePersistedState<FloatFrame>(
+  'shell',
+  'chatFloatFrame',
+  defaultFrame(),
+)
+
+function clampInViewport(f: FloatFrame): FloatFrame {
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  // 允许超出一点，但至少留 80px 在视窗内方便拖回来
+  const w = Math.min(Math.max(f.w, MIN_W), Math.max(vw, MIN_W))
+  const h = Math.min(Math.max(f.h, MIN_H), Math.max(vh, MIN_H))
+  const x = Math.min(Math.max(f.x, -w + 80), Math.max(vw - 80, 0))
+  const y = Math.min(Math.max(f.y, 0), Math.max(vh - 40, 0))
+  return { x, y, w, h }
+}
+
+type DragMode = null | 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
+const dragMode = ref<DragMode>(null)
+interface DragOrigin { x: number; y: number; frame: FloatFrame }
+let dragOrigin: DragOrigin | null = null
+
+function beginDrag(mode: Exclude<DragMode, null>) {
+  return (e: PointerEvent) => {
+    if (props.position !== 'float') return
+    if (mode === 'move') {
+      // 避免按钉头区的按钮时触发拖动
+      const target = e.target as HTMLElement
+      if (target.closest('button,select,input,textarea')) return
+    }
+    e.preventDefault()
+    dragMode.value = mode
+    dragOrigin = { x: e.clientX, y: e.clientY, frame: { ...floatFrame.value } }
+    const target = e.currentTarget as HTMLElement
+    try { target.setPointerCapture?.(e.pointerId) } catch {}
+    window.addEventListener('pointermove', onDragMove)
+    window.addEventListener('pointerup', onDragEnd, { once: true })
+    window.addEventListener('pointercancel', onDragEnd, { once: true })
+  }
+}
+
+function onDragMove(e: PointerEvent) {
+  if (!dragOrigin || !dragMode.value) return
+  const dx = e.clientX - dragOrigin.x
+  const dy = e.clientY - dragOrigin.y
+  const f0 = dragOrigin.frame
+  let { x, y, w, h } = f0
+  const mode = dragMode.value
+  if (mode === 'move') {
+    x = f0.x + dx
+    y = f0.y + dy
+  } else {
+    if (mode.includes('e')) w = Math.max(MIN_W, f0.w + dx)
+    if (mode.includes('s')) h = Math.max(MIN_H, f0.h + dy)
+    if (mode.includes('w')) {
+      const newW = Math.max(MIN_W, f0.w - dx)
+      x = f0.x + (f0.w - newW)
+      w = newW
+    }
+    if (mode.includes('n')) {
+      const newH = Math.max(MIN_H, f0.h - dy)
+      y = f0.y + (f0.h - newH)
+      h = newH
+    }
+  }
+  floatFrame.value = clampInViewport({ x, y, w, h })
+}
+
+function onDragEnd() {
+  dragMode.value = null
+  dragOrigin = null
+  window.removeEventListener('pointermove', onDragMove)
+}
+
+function onWinResize() {
+  if (props.position === 'float') {
+    floatFrame.value = clampInViewport(floatFrame.value)
+  }
+}
+
+watch(() => props.position, (p) => {
+  if (p === 'float') floatFrame.value = clampInViewport(floatFrame.value)
+})
 
 // 观察消息变化触发滚动
 let stopWatching: (() => void) | null = null
@@ -125,18 +230,26 @@ onMounted(() => {
   const observer = new MutationObserver(scrollBottom)
   if (streamRef.value) observer.observe(streamRef.value, { childList: true, subtree: true })
   stopWatching = () => observer.disconnect()
+  window.addEventListener('resize', onWinResize)
 })
-onBeforeUnmount(() => { stopWatching?.() })
+onBeforeUnmount(() => {
+  stopWatching?.()
+  window.removeEventListener('resize', onWinResize)
+  window.removeEventListener('pointermove', onDragMove)
+})
 </script>
 
 <template>
   <aside
     v-if="position !== 'hidden'"
     class="chat"
-    :class="position"
+    :class="[position, { dragging: dragMode !== null }]"
     :style="floatStyle"
   >
-    <header>
+    <header
+      :class="{ 'float-drag': position === 'float' }"
+      @pointerdown="position === 'float' ? beginDrag('move')($event) : undefined"
+    >
       <div class="title">对话</div>
       <div class="grow" />
       <button class="gear" title="设置" @click="showSettings = !showSettings">⚙</button>
@@ -287,6 +400,18 @@ onBeforeUnmount(() => { stopWatching?.() })
       <img :src="previewUrl" />
       <button class="preview-close" @click.stop="closePreview">×</button>
     </div>
+
+    <!-- 悬浮态的 8 个 resize 手柄 -->
+    <template v-if="position === 'float'">
+      <div class="resize-handle n" @pointerdown="beginDrag('n')($event)" />
+      <div class="resize-handle s" @pointerdown="beginDrag('s')($event)" />
+      <div class="resize-handle e" @pointerdown="beginDrag('e')($event)" />
+      <div class="resize-handle w" @pointerdown="beginDrag('w')($event)" />
+      <div class="resize-handle ne" @pointerdown="beginDrag('ne')($event)" />
+      <div class="resize-handle nw" @pointerdown="beginDrag('nw')($event)" />
+      <div class="resize-handle se" @pointerdown="beginDrag('se')($event)" />
+      <div class="resize-handle sw" @pointerdown="beginDrag('sw')($event)" />
+    </template>
   </aside>
 </template>
 
@@ -306,7 +431,32 @@ onBeforeUnmount(() => { stopWatching?.() })
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5);
   overflow: hidden;
+  z-index: 5000;           /* 置顶在 app 窗口之上，低于图片预览 9999 */
 }
+.chat.float.dragging { user-select: none; }
+header.float-drag {
+  cursor: move;
+  touch-action: none;
+}
+header.float-drag button,
+header.float-drag select,
+header.float-drag input,
+header.float-drag textarea { cursor: pointer; }
+
+/* resize 手柄 —— 轻量开键区，视觉上不入侵 */
+.resize-handle {
+  position: absolute;
+  z-index: 5001;
+  touch-action: none;
+}
+.resize-handle.n  { top: -3px; left: 8px; right: 8px; height: 6px; cursor: ns-resize; }
+.resize-handle.s  { bottom: -3px; left: 8px; right: 8px; height: 6px; cursor: ns-resize; }
+.resize-handle.e  { top: 8px; bottom: 8px; right: -3px; width: 6px; cursor: ew-resize; }
+.resize-handle.w  { top: 8px; bottom: 8px; left: -3px; width: 6px; cursor: ew-resize; }
+.resize-handle.ne { top: -4px; right: -4px; width: 14px; height: 14px; cursor: nesw-resize; }
+.resize-handle.nw { top: -4px; left: -4px;  width: 14px; height: 14px; cursor: nwse-resize; }
+.resize-handle.se { bottom: -4px; right: -4px; width: 14px; height: 14px; cursor: nwse-resize; }
+.resize-handle.sw { bottom: -4px; left: -4px;  width: 14px; height: 14px; cursor: nesw-resize; }
 header {
   padding: 10px 14px;
   display: flex;
