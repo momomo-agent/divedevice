@@ -203,5 +203,22 @@ export const finderManifest: AppManifest = {
         return { path: args.path, bytes }
       },
     },
+    {
+      name: 'fs.open',
+      description: '用对应的 app 打开文件（文本→Editor，视频/音频→Media，图片→预览）。类似 Finder 双击。',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: '设备上的文件路径' } },
+        required: ['path'],
+      },
+      async execute(args, ctx) {
+        const p = String(args.path)
+        const { lookup } = await import('@/services/file-assoc')
+        const { windowManager } = await import('@/services')
+        const assoc = lookup(p)
+        windowManager.open({ appId: assoc.appId, deviceId: ctx.deviceId, title: assoc.title?.(p.split('/').pop() ?? '') ?? p.split('/').pop() ?? '', props: { [assoc.pathProp]: p } })
+        return { opened: assoc.appId, path: p }
+      },
+    },
   ],
 }

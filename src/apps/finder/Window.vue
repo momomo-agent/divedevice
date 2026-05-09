@@ -299,6 +299,10 @@ function onEnter(entry: FileEntry) {
     path.value = entry.path
     return
   }
+  if (/\.apk$/i.test(entry.name)) {
+    installApk(entry)
+    return
+  }
   if (isImageFile(entry.name)) {
     openPreview(entry)
     return
@@ -330,6 +334,17 @@ function isImage(name: string) {
 // ---- Quick image preview (list/icons 双击图片时用) ----
 const previewEntry = ref<FileEntry | null>(null)
 const previewUrl = ref<string | null>(null)
+async function installApk(e: FileEntry) {
+  if (!device.value) return
+  chat.push('system', `⏳ 安装中 ${e.name}…`)
+  try {
+    await device.value.app.install({ devicePath: e.path }, { replace: true, grantAll: true })
+    chat.push('system', `✓ 安装成功 ${e.name}`)
+  } catch (err) {
+    chat.push('system', `✗ 安装失败 ${e.name}: ${(err as Error).message}`)
+  }
+}
+
 async function openPreview(e: FileEntry) {
   if (!device.value) return
   previewEntry.value = e
@@ -1243,6 +1258,7 @@ function closeContextMenu() { contextMenu.value = null }
     >
       <div class="ctx-title" v-if="selection.size > 1">{{ selection.size }} 个项目</div>
       <button v-if="selection.size === 1" @click="onEnter(contextMenu.entry); closeContextMenu()">打开</button>
+      <button v-if="selection.size === 1 && /\.apk$/i.test(contextMenu.entry.name)" @click="installApk(contextMenu.entry); closeContextMenu()">安装 APK</button>
       <button v-if="selection.size === 1" @click="startRename(contextMenu.entry); closeContextMenu()">重命名</button>
       <button @click="downloadSelection(); closeContextMenu()">下载到本地</button>
       <div class="ctx-sep"></div>
