@@ -146,6 +146,52 @@ const { state: floatFrame } = usePersistedState<FloatFrame>(
   defaultFrame(),
 )
 
+// ---------- docked (left/right) 宽度 ----------
+const DOCK_MIN_W = 280
+const DOCK_RESERVE = 300 // 主区至少留这么宽
+function clampDockedWidth(w: number): number {
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1200
+  const max = Math.max(DOCK_MIN_W, vw - DOCK_RESERVE)
+  return Math.min(Math.max(w, DOCK_MIN_W), max)
+}
+const { state: dockedWidth } = usePersistedState<number>(
+  'shell',
+  'chatDockedWidth',
+  360,
+)
+let dockDragOrigin: { x: number; w: number } | null = null
+const dockResizing = ref(false)
+function beginDockResize(e: PointerEvent) {
+  if (props.position !== 'left' && props.position !== 'right') return
+  e.preventDefault()
+  dockResizing.value = true
+  dockDragOrigin = { x: e.clientX, w: dockedWidth.value }
+  const target = e.currentTarget as HTMLElement
+  try { target.setPointerCapture?.(e.pointerId) } catch {}
+  window.addEventListener('pointermove', onDockResizeMove)
+  window.addEventListener('pointerup', onDockResizeEnd, { once: true })
+  window.addEventListener('pointercancel', onDockResizeEnd, { once: true })
+}
+function onDockResizeMove(e: PointerEvent) {
+  if (!dockDragOrigin) return
+  const dx = e.clientX - dockDragOrigin.x
+  // right 态：把手在面板左侧，往左拖变宽（dx<0 → +width）
+  // left  态：把手在面板右侧，往右拖变宽（dx>0 → +width）
+  const signed = props.position === 'right' ? -dx : dx
+  dockedWidth.value = clampDockedWidth(dockDragOrigin.w + signed)
+}
+function onDockResizeEnd() {
+  dockResizing.value = false
+  dockDragOrigin = null
+  window.removeEventListener('pointermove', onDockResizeMove)
+}
+
+const dockStyle = computed(() =>
+  props.position === 'left' || props.position === 'right'
+    ? { width: dockedWidth.value + 'px' }
+    : undefined,
+)
+
 function clampInViewport(f: FloatFrame): FloatFrame {
   const vw = window.innerWidth
   const vh = window.innerHeight
@@ -218,6 +264,10 @@ function onWinResize() {
   if (props.position === 'float') {
     floatFrame.value = clampInViewport(floatFrame.value)
   }
+  if (props.position === 'left' || props.position === 'right') {
+    const clamped = clampDockedWidth(dockedWidth.value)
+    if (clamped !== dockedWidth.value) dockedWidth.value = clamped
+  }
 }
 
 watch(() => props.position, (p) => {
@@ -236,6 +286,7 @@ onBeforeUnmount(() => {
   stopWatching?.()
   window.removeEventListener('resize', onWinResize)
   window.removeEventListener('pointermove', onDragMove)
+  window.removeEventListener('pointermove', onDockResizeMove)
 })
 </script>
 
@@ -244,7 +295,7 @@ onBeforeUnmount(() => {
     v-if="position !== 'hidden'"
     class="chat"
     :class="[position, { dragging: dragMode !== null }]"
-    :style="floatStyle"
+    :style="floatStyle || dockStyle"
   >
     <header
       :class="{ 'float-drag': position === 'float' }"
@@ -412,6 +463,13 @@ onBeforeUnmount(() => {
       <div class="resize-handle se" @pointerdown="beginDrag('se')($event)" />
       <div class="resize-handle sw" @pointerdown="beginDrag('sw')($event)" />
     </template>
+    <!-- docked (left/right) 宽度拖拽手柄 -->
+    <div
+      v-if="position === 'left' || position === 'right'"
+      class="dock-resize-handle"
+      :class="position"
+      @pointerdown="beginDockResize($event)"
+    />
   </aside>
 </template>
 
@@ -424,6 +482,25 @@ onBeforeUnmount(() => {
   background: var(--surface-2);
   border-left: 1px solid rgba(255, 255, 255, 0.05);
   color: var(--fg-1);
+  position: relative;
+}
+.chat.left, .chat.right { flex: 0 0 auto; }
+.chat.dock-resizing { user-select: none; }
+.dock-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  z-index: 10;
+  background: transparent;
+  transition: background 120ms ease;
+}
+.dock-resize-handle.right { left: -3px; }
+.dock-resize-handle.left  { right: -3px; }
+.dock-resize-handle:hover,
+.chat.dock-resizing .dock-resize-handle {
+  background: rgba(120, 160, 255, 0.25);
 }
 .chat.left { border-left: none; border-right: 1px solid rgba(255, 255, 255, 0.05); }
 .chat.float {

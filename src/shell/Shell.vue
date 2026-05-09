@@ -11,6 +11,9 @@ const { state: chatPos } = usePersistedState<ChatPosition>('shell', 'chatPos', '
 // “上次不是 hidden 的位置”——按 ⌘J 唤起时回到这里
 const { state: previousPos } = usePersistedState<ChatPosition>('shell', 'chatPrevPos', 'right')
 
+// 左右对话面板宽度（ChatPanel 同 key，StatusBar right-inset 要跟）
+const { state: dockedWidth } = usePersistedState<number>('shell', 'chatDockedWidth', 360)
+
 // 从 hidden 切回可见时，同步更新 previousPos
 watch(chatPos, (v, old) => {
   if (old === 'hidden' && v !== 'hidden') previousPos.value = v
@@ -58,7 +61,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       title="唤起对话 (⌘J)"
       @click="chatPos = previousPos === 'hidden' ? 'right' : previousPos"
     >✶</button>
-    <StatusBar :right-inset="chatPos === 'right' ? 360 : 0" />
+    <StatusBar :right-inset="chatPos === 'right' ? dockedWidth : 0" />
   </div>
 </template>
 
