@@ -1,20 +1,12 @@
 /**
  * APK / APKS zip 导出辅助
- * - triggerDownload: 通过 <a download> 触发浏览器下载
- * - buildStoreZip: 纯处理（store）方式打包 ZIP，不压缩，零依赖
- *   实现参考 APPNOTE.TXT (PKZIP spec)
+ * buildStoreZip: 纯处理（store）方式打包 ZIP，不压缩，零依赖
+ * 实现参考 APPNOTE.TXT (PKZIP spec)
+ *
+ * triggerDownload 已移到 @/services/download，统一复用。
  */
 
-export function triggerDownload(filename: string, bytes: Uint8Array, mimeType: string) {
-  const blob = new Blob([bytes as BlobPart], { type: mimeType })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url) }, 1000)
-}
+export { triggerDownload } from '@/services/download'
 
 // CRC-32 (IEEE 802.3) 表
 const CRC_TABLE = (() => {
