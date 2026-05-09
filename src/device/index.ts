@@ -358,6 +358,10 @@ export interface DeviceAPI {
     }>
     /** 上电时长 uptime 秒 */
     uptime(): Promise<number>
+    /** uiautomator dump —— 拿当前屏幕的 View Hierarchy XML */
+    viewHierarchy(): Promise<string>
+    /** 屏幕信息：分辨率 / 密度 / 刷新率 */
+    displayInfo(): Promise<{ physicalSize: { w: number; h: number } | null; overrideSize: { w: number; h: number } | null; physicalDensity: number | null; overrideDensity: number | null; refreshRate: number | null }>
   }
 
   /** am 系列。intent 组合器 + 常见 shortcut */
@@ -1455,6 +1459,47 @@ class AdbDeviceAPI implements DeviceAPI {
     uptime: async (): Promise<number> => {
       const { stdout } = await this.shell.exec('cat /proc/uptime')
       return Number(stdout.trim().split(/\s+/)[0]) || 0
+    },
+
+    /** uiautomator dump —— 拿当前屏幕的 View Hierarchy XML */
+    viewHierarchy: async (): Promise<string> => {
+      // 先尝试 dump 到 /dev/tty（stdout），失败则 dump 到文件再读
+      const { stdout, exitCode } = await this.shell.exec('uiautomator dump /dev/tty')
+      if (exitCode === 0 && stdout.includes('<?xml')) {
+        // stdout 可能带前缀 "UI hierchary dumped to: /dev/tty"
+        const xmlStart = stdout.indexOf('<?xml')
+        return stdout.slice(xmlStart)
+      }
+      // fallback: dump 到文件
+      await this.shell.exec('uiautomator dump /sdcard/window_dump.xml')
+      const text = await this.fs.readText('/sdcard/window_dump.xml')
+      await this.fs.rm('/sdcard/window_dump.xml').catch(() => {})
+      return text
+    },
+
+    /** 屏幕信息：分辨率 / 密度 / 刷新率 */
+    displayInfo: async (): Promise<{ physicalSize: { w: number; h: number } | null; overrideSize: { w: number; h: number } | null; physicalDensity: number | null; overrideDensity: number | null; refreshRate: number | null }> => {
+      const [sizeRes, densRes, surfRes] = await Promise.all([
+        this.shell.exec('wm size'),
+        this.shell.exec('wm density'),
+        this.shell.exec('dumpsys SurfaceFlinger --display-id 0 2>/dev/null || dumpsys display | grep -i refresh').catch(() => ({ stdout: '' })),
+      ])
+      const parseSize = (s: string, label: string) => {
+        const m = s.match(new RegExp(label + '\\s*size:\\s*(\\d+)x(\\d+)'))
+        return m ? { w: Number(m[1]), h: Number(m[2]) } : null
+      }
+      const parseDens = (s: string, label: string) => {
+        const m = s.match(new RegExp(label + '\\s*density:\\s*(\\d+)'))
+        return m ? Number(m[1]) : null
+      }
+      const refreshMatch = surfRes.stdout.match(/(\d+(?:\.\d+)?)\s*(?:fps|Hz)/i)
+      return {
+        physicalSize: parseSize(sizeRes.stdout, 'Physical'),
+        overrideSize: parseSize(sizeRes.stdout, 'Override'),
+        physicalDensity: parseDens(densRes.stdout, 'Physical'),
+        overrideDensity: parseDens(densRes.stdout, 'Override'),
+        refreshRate: refreshMatch ? Number(refreshMatch[1]) : null,
+      }
     },
   }
 

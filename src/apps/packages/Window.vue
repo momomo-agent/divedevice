@@ -162,6 +162,31 @@ function copyPkgName() {
   navigator.clipboard?.writeText(selected.value).catch(() => {})
 }
 
+async function pickAndInstall() {
+  if (!device.value) return
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = '.apk'
+  input.multiple = true
+  input.onchange = async () => {
+    const files = input.files
+    if (!files?.length) return
+    for (const file of files) {
+      busy.value = `安装中 ${file.name}…`
+      try {
+        const buf = new Uint8Array(await file.arrayBuffer())
+        await device.value!.app.install(buf, { replace: true, grantAll: true })
+        chat.push('system', `✓ 安装成功 ${file.name}`)
+      } catch (err) {
+        chat.push('system', `✗ 安装失败 ${file.name}: ${(err as Error).message}`)
+      }
+    }
+    busy.value = null
+    await loadList()
+  }
+  input.click()
+}
+
 function fmtTs(ms?: number) {
   if (!ms) return '—'
   return new Date(ms).toLocaleString()
@@ -182,6 +207,7 @@ onBeforeUnmount(() => {})
       </div>
       <input v-model="query" class="search" placeholder="搜索包名 / 应用名…" />
       <button class="icon-btn" @click="loadList" title="刷新" :disabled="loading">⟳</button>
+      <button class="icon-btn" @click="pickAndInstall" title="安装 APK" :disabled="!device">⬆</button>
       <span class="count">{{ visible.length }} / {{ pkgs.length }}</span>
     </header>
 

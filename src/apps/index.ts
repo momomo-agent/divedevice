@@ -11,6 +11,7 @@ import { screencastManifest } from './screencast/manifest'
 import { screenshotManifest } from './screenshot/manifest'
 import { recorderManifest } from './recorder/manifest'
 import { logcatManifest } from './logcat/manifest'
+import { layoutManifest } from './layout/manifest'
 
 export function registerBuiltInApps() {
   appRegistry.register(finderManifest)
@@ -24,6 +25,7 @@ export function registerBuiltInApps() {
   appRegistry.register(screenshotManifest)
   appRegistry.register(recorderManifest)
   appRegistry.register(logcatManifest)
+  appRegistry.register(layoutManifest)
 
   // 系统级 agent tools（桃面 / 窗口自省）
   registerDesktopTools()

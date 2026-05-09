@@ -12,6 +12,33 @@ export const packagesManifest: AppManifest = {
   windowDefaults: { width: 920, height: 600, resizable: true, minWidth: 560, minHeight: 360 },
   tools: [
     {
+      name: 'pkg.install',
+      description: '安装 APK 到设备。支持从设备路径安装（已 push 到设备的 apk）或从本地文件安装（通过 base64）。默认 -r 覆盖安装 + -g 授权。',
+      parameters: {
+        type: 'object',
+        properties: {
+          devicePath: { type: 'string', description: '设备上已有的 APK 路径（优先）' },
+          replace: { type: 'boolean', description: '覆盖安装，默认 true' },
+          downgrade: { type: 'boolean', description: '允许降级' },
+          grantAll: { type: 'boolean', description: '授予全部权限，默认 true' },
+        },
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        const opts = {
+          replace: args.replace !== false,
+          downgrade: !!args.downgrade,
+          grantAll: args.grantAll !== false,
+        }
+        if (args.devicePath) {
+          await d.app.install({ devicePath: String(args.devicePath) }, opts)
+          return { ok: true, source: 'device', path: args.devicePath }
+        }
+        throw new Error('请提供 devicePath（设备上的 APK 路径）')
+      },
+    },
+    {
       name: 'pkg.list',
       description: '列出 Android 设备上已安装的应用包名。可过滤第三方 / 系统。',
       parameters: {

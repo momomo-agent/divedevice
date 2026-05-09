@@ -904,7 +904,25 @@ async function onDrop(ev: DragEvent) {
   if (!ev.dataTransfer || !device.value) return
   const files = await collectDropped(ev.dataTransfer)
   if (!files.length) return
-  await uploadFiles(files)
+
+  // APK 文件直接安装（不上传到当前目录）
+  const apks = files.filter((f) => /\.apk$/i.test(f.relPath))
+  const others = files.filter((f) => !/\.apk$/i.test(f.relPath))
+
+  if (apks.length) {
+    for (const { file, relPath } of apks) {
+      chat.push('system', `⏳ 安装中 ${relPath}…`)
+      try {
+        const buf = new Uint8Array(await file.arrayBuffer())
+        await device.value!.app.install(buf, { replace: true, grantAll: true })
+        chat.push('system', `✓ 安装成功 ${relPath}`)
+      } catch (err) {
+        chat.push('system', `✗ 安装失败 ${relPath}: ${(err as Error).message}`)
+      }
+    }
+  }
+
+  if (others.length) await uploadFiles(others)
 }
 function onDragEnter(ev: DragEvent) {
   if (!ev.dataTransfer?.types?.includes('Files')) return
