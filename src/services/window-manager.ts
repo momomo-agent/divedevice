@@ -8,6 +8,45 @@ import { eventBus } from './eventbus'
 import { deviceHub } from './device-hub'
 import type { WindowFrame, WindowInstance } from '@/types'
 
+// ---- Frame 持久化 ----
+// 直接用 IndexedDB（通过 agentic-store）存每个 appId 的上次 frame。
+// 不用 usePersistedState（那是 composable，需要 setup context）。
+interface FrameStore {
+  save(appId: string, frame: WindowFrame): void
+  load(appId: string): Promise<WindowFrame | null>
+}
+
+const frameStore: FrameStore = (() => {
+  let ai: { save: (k: string, v: unknown) => Promise<void>; load: (k: string) => Promise<unknown> } | null = null
+  const pending = new Map<string, number>() // debounce timers
+
+  function getAi() {
+    if (ai) return ai
+    const G = (globalThis as unknown as { Agentic?: { Agentic: new (o?: Record<string, unknown>) => typeof ai } }).Agentic
+    if (!G) return null
+    ai = new G.Agentic({ store: { name: 'windowFrames' } }) as typeof ai
+    return ai
+  }
+
+  return {
+    save(appId: string, frame: WindowFrame) {
+      const prev = pending.get(appId)
+      if (prev) clearTimeout(prev)
+      pending.set(appId, window.setTimeout(async () => {
+        pending.delete(appId)
+        try { await getAi()?.save(appId, { ...frame }) } catch { /* 忽略 */ }
+      }, 120) as unknown as number)
+    },
+    async load(appId: string): Promise<WindowFrame | null> {
+      try {
+        const v = await getAi()?.load(appId)
+        if (v && typeof v === 'object' && 'x' in (v as object)) return v as WindowFrame
+      } catch { /* 忽略 */ }
+      return null
+    },
+  }
+})()
+
 interface State {
   windows: WindowInstance[]
   focusedId: string | null
@@ -77,12 +116,34 @@ export const windowManager = {
     state.windows.push(win)
     state.focusedId = id
     eventBus.emit('window.opened', { window: win })
+
+    // 异步恢复上次 frame（不阻塞打开，IndexedDB 读取 <5ms）
+    if (!opts.frame) {
+      frameStore.load(app.id).then((saved) => {
+        if (saved && state.windows.includes(win)) {
+          // clamp 到当前 viewport
+          const vw = globalThis.innerWidth ?? 1280
+          const vh = globalThis.innerHeight ?? 800
+          const minW = app.windowDefaults.minWidth ?? 320
+          const minH = app.windowDefaults.minHeight ?? 200
+          saved.width = Math.max(minW, Math.min(saved.width, vw - 60))
+          saved.height = Math.max(minH, Math.min(saved.height, vh - 60))
+          saved.x = Math.max(0, Math.min(saved.x, vw - saved.width))
+          saved.y = Math.max(0, Math.min(saved.y, vh - saved.height))
+          Object.assign(win.frame, saved)
+        }
+      })
+    }
+
     return win
   },
 
   close(id: string) {
     const idx = state.windows.findIndex((w) => w.id === id)
     if (idx < 0) return
+    const win = state.windows[idx]
+    // 关窗前立即存 frame
+    frameStore.save(win.appId, { ...win.frame })
     state.windows.splice(idx, 1)
     if (state.focusedId === id) {
       state.focusedId = state.windows.length
@@ -104,6 +165,8 @@ export const windowManager = {
     const w = state.windows.find((x) => x.id === id)
     if (!w) return
     Object.assign(w.frame, patch)
+    // debounce 存回
+    frameStore.save(w.appId, { ...w.frame })
   },
 
   setTitle(id: string, title: string) {
