@@ -1,6 +1,7 @@
 import type { AppManifest } from '@/types'
 import { getDevice } from '@/device'
 import Window from './Window.vue'
+import { triggerDownload, buildStoreZip } from './apk-export'
 
 export const packagesManifest: AppManifest = {
   id: 'packages',
@@ -90,6 +91,32 @@ export const packagesManifest: AppManifest = {
         if (!d) throw new Error('未绑定设备')
         await d.app.clear(String(args.pkg))
         return { ok: true }
+      },
+    },
+    {
+      name: 'pkg.export',
+      description: '从设备导出指定包的 APK 到浏览器下载目录。默认只导 base.apk；includeSplits=true 时会打包所有 split APK 为 zip。',
+      parameters: {
+        type: 'object',
+        properties: {
+          pkg: { type: 'string' },
+          includeSplits: { type: 'boolean', description: '同时导出 split APKs，打包为 zip' },
+        },
+        required: ['pkg'],
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        const pkg = String(args.pkg)
+        const includeSplits = !!args.includeSplits
+        const apks = await d.app.exportApk(pkg, { includeSplits })
+        if (apks.length === 1) {
+          triggerDownload(`${pkg}.apk`, apks[0].data, 'application/vnd.android.package-archive')
+          return { ok: true, files: [{ name: apks[0].name, size: apks[0].data.length }] }
+        }
+        const zipped = buildStoreZip(apks.map(a => ({ name: a.name, data: a.data })))
+        triggerDownload(`${pkg}.apks.zip`, zipped, 'application/zip')
+        return { ok: true, files: apks.map(a => ({ name: a.name, size: a.data.length })) }
       },
     },
     {

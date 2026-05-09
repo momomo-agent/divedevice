@@ -6,6 +6,7 @@
 import { ref, computed, watch, shallowRef, onBeforeUnmount } from 'vue'
 import { useDevice, useWindow, useAppController } from '@/composables'
 import { chat } from '@/services'
+import { triggerDownload, buildStoreZip } from './apk-export'
 import type { PackageInfo } from '@/device'
 
 const { window: win } = useWindow()
@@ -108,10 +109,10 @@ useAppController({
 })
 
 // ---- 操作 ----
-async function op(kind: 'launch' | 'stop' | 'clear' | 'disable' | 'enable' | 'uninstall', pkg: string) {
+async function op(kind: 'launch' | 'stop' | 'clear' | 'disable' | 'enable' | 'uninstall' | 'export' | 'exportSplits', pkg: string) {
   if (!device.value || busy.value) return
   const labels: Record<typeof kind, string> = {
-    launch: '启动', stop: '停止', clear: '清数据', disable: '禁用', enable: '启用', uninstall: '卸载',
+    launch: '启动', stop: '停止', clear: '清数据', disable: '禁用', enable: '启用', uninstall: '卸载', export: '导出 APK', exportSplits: '导出全部 APK',
   }
   // 破坏性确认
   if (kind === 'uninstall' && !confirm(`确定要卸载 ${pkg} 吗？`)) return
@@ -124,6 +125,21 @@ async function op(kind: 'launch' | 'stop' | 'clear' | 'disable' | 'enable' | 'un
     else if (kind === 'disable') await device.value.app.disable(pkg)
     else if (kind === 'enable') await device.value.app.enable(pkg)
     else if (kind === 'uninstall') await device.value.app.uninstall(pkg)
+    else if (kind === 'export' || kind === 'exportSplits') {
+      const includeSplits = kind === 'exportSplits'
+      const apks = await device.value.app.exportApk(pkg, { includeSplits })
+      if (apks.length === 1) {
+        triggerDownload(`${pkg}.apk`, apks[0].data, 'application/vnd.android.package-archive')
+      } else {
+        const zipped = buildStoreZip(apks.map(a => ({ name: a.name, data: a.data })))
+        triggerDownload(`${pkg}.apks.zip`, zipped, 'application/zip')
+      }
+      const totalBytes = apks.reduce((s, a) => s + a.data.length, 0)
+      const mb = (totalBytes / 1024 / 1024).toFixed(1)
+      chat.push('system', `✓ ${labels[kind]} ${pkg} · ${apks.length} 文件 · ${mb} MB`)
+      busy.value = null
+      return
+    }
     chat.push('system', `✓ ${labels[kind]} ${pkg}`)
     if (kind === 'uninstall') {
       pkgs.value = pkgs.value.filter((p) => p !== pkg)
@@ -212,6 +228,8 @@ onBeforeUnmount(() => {})
             <button class="btn primary" @click="op('launch', selected)" :disabled="!!busy">▶ 启动</button>
             <button class="btn" @click="op('stop', selected)" :disabled="!!busy">■ 停止</button>
             <button class="btn" @click="op('clear', selected)" :disabled="!!busy">♻ 清数据</button>
+            <button class="btn" @click="op('export', selected)" :disabled="!!busy" title="导出 base APK">⬇ 导出 APK</button>
+            <button class="btn" @click="op('exportSplits', selected)" :disabled="!!busy" title="包括所有 split APK打成 zip">⬇ 全部 APK</button>
             <button v-if="selectedInfo?.enabled === false" class="btn" @click="op('enable', selected)" :disabled="!!busy">启用</button>
             <button v-else class="btn" @click="op('disable', selected)" :disabled="!!busy || selectedInfo?.isSystem">禁用</button>
             <button class="btn danger" @click="op('uninstall', selected)" :disabled="!!busy || selectedInfo?.isSystem">🗑 卸载</button>

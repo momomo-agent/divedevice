@@ -306,6 +306,8 @@ export interface DeviceAPI {
     trimCache(pkg: string): Promise<void>
     /** pm path <pkg>：查 apk 路径（方便 pull） */
     apkPaths(pkg: string): Promise<string[]>
+    /** 从设备拉取 apk 文件（支持 split APK，返回优先 base）。默认仅拉 base.apk；设 includeSplits=true 拉全部 split。 */
+    exportApk(pkg: string, opts?: { includeSplits?: boolean }): Promise<Array<{ name: string; data: Uint8Array; devicePath: string }>>
   }
 
   /** 系统 / 调试查询（dumpsys / 属性 / 进程） */
@@ -1147,6 +1149,26 @@ class AdbDeviceAPI implements DeviceAPI {
       return stdout.split('\n').map((l) => l.trim())
         .filter((l) => l.startsWith('package:'))
         .map((l) => l.slice('package:'.length))
+    },
+
+    exportApk: async (pkg: string, opts?: { includeSplits?: boolean }): Promise<Array<{ name: string; data: Uint8Array; devicePath: string }>> => {
+      const paths = await this.app.apkPaths(pkg)
+      if (!paths.length) throw new Error(`找不到 ${pkg} 的 apk 路径`)
+      // base.apk 总优先；split 在 includeSplits 打开时才拉
+      const ordered = paths.slice().sort((a, b) => {
+        const aBase = /\/base\.apk$/.test(a) ? 0 : 1
+        const bBase = /\/base\.apk$/.test(b) ? 0 : 1
+        return aBase - bBase
+      })
+      const targets = opts?.includeSplits ? ordered : ordered.slice(0, 1)
+      const out: Array<{ name: string; data: Uint8Array; devicePath: string }> = []
+      for (const p of targets) {
+        const data = await this.fs.read(p)
+        // 从 devicePath 抽文件名；函数名冲突少现 比如 config.arm64_v8a.apk
+        const fname = p.split('/').pop() || 'base.apk'
+        out.push({ name: fname, data, devicePath: p })
+      }
+      return out
     },
   }
 
