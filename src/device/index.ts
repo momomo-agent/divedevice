@@ -566,8 +566,35 @@ export interface DeviceAPI {
 
 class AdbDeviceAPI implements DeviceAPI {
   readonly id: string
+  readonly raw!: DeviceAPI['raw']
   constructor(private conn: AdbConnection) {
     this.id = conn.info.id
+    // raw 必须在构造函数里初始化：ES2022 + useDefineForClassFields=true 下，
+    // 类字段初始化器会先于 `private conn` 参数属性赋值执行，
+    // 那时 `this.conn` 还是 undefined，放在字段初始化器里会炸。
+    const c = conn
+    ;(this as { raw: DeviceAPI['raw'] }).raw = {
+      connection: c,
+      adb: c.adb,
+      createSocket: async (service: string) => {
+        const socket = await c.adb.createSocket(service)
+        return {
+          readable: socket.readable as unknown as RS<Uint8Array>,
+          writable: socket.writable as unknown as WS<Uint8Array>,
+          close: async () => { await socket.close() },
+        }
+      },
+      openSync: async () => {
+        const sync = await c.adb.sync()
+        return sync as unknown as {
+          read(path: string): RS<Uint8Array>
+          write(args: { filename: string; file: RS<Uint8Array>; mode?: number; mtime?: number }): Promise<void>
+          opendir(path: string): AsyncIterable<unknown>
+          lstat(path: string): Promise<unknown>
+          dispose(): Promise<void>
+        }
+      },
+    }
   }
 
   // ---- helpers ----
@@ -1744,33 +1771,7 @@ class AdbDeviceAPI implements DeviceAPI {
     },
   }
 
-  // ---- raw 逃生舱 ----
-
-  raw: DeviceAPI['raw'] = (() => {
-    const conn = this.conn
-    return {
-      connection: conn,
-      adb: conn.adb,
-      createSocket: async (service: string) => {
-        const socket = await conn.adb.createSocket(service)
-        return {
-          readable: socket.readable as unknown as RS<Uint8Array>,
-          writable: socket.writable as unknown as WS<Uint8Array>,
-          close: async () => { await socket.close() },
-        }
-      },
-      openSync: async () => {
-        const sync = await conn.adb.sync()
-        return sync as unknown as {
-          read(path: string): RS<Uint8Array>
-          write(args: { filename: string; file: RS<Uint8Array>; mode?: number; mtime?: number }): Promise<void>
-          opendir(path: string): AsyncIterable<unknown>
-          lstat(path: string): Promise<unknown>
-          dispose(): Promise<void>
-        }
-      },
-    }
-  })()
+  // ---- raw 逃生舱（在 constructor 里初始化，见上） ----
 
   // ---- extend ----
 
