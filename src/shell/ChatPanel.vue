@@ -21,6 +21,30 @@ const attachments = ref<AgentImage[]>([])
 const dragOver = ref(false)
 const previewUrl = ref<string | null>(null)
 
+// Tool 消息展开/折叠状态
+const expandedTools = ref(new Set<string>())
+function toggleToolExpand(id: string) {
+  if (expandedTools.value.has(id)) expandedTools.value.delete(id)
+  else expandedTools.value.add(id)
+  expandedTools.value = new Set(expandedTools.value)
+}
+function toolArgsSummary(input: unknown): string {
+  if (!input || typeof input !== 'object') return ''
+  const entries = Object.entries(input as Record<string, unknown>)
+  if (!entries.length) return ''
+  const parts = entries.slice(0, 3).map(([k, v]) => {
+    const val = typeof v === 'string' ? (v.length > 30 ? v.slice(0, 30) + '…' : v) : JSON.stringify(v)
+    return `${k}=${val}`
+  })
+  if (entries.length > 3) parts.push('…')
+  return parts.join(', ')
+}
+function toolResultSummary(content: string): string {
+  if (!content) return '(empty)'
+  if (content.length <= 60) return content
+  return content.slice(0, 60) + '…'
+}
+
 const { composing, onCompositionStart, onCompositionEnd } = useComposingLock()
 
 function onInputKey(e: KeyboardEvent) {
@@ -358,19 +382,41 @@ onBeforeUnmount(() => {
         v-for="m in chat.messages"
         :key="m.id"
         class="msg"
-        :class="m.role"
+        :class="[m.role, { 'tool-error': m.role === 'tool' && (m.meta as any)?.error }]"
       >
-        <div class="role">{{ m.role }}</div>
-        <div v-if="m.meta && (m.meta as any).images" class="msg-imgs">
-          <img
-            v-for="(im, i) in ((m.meta as any).images as Array<{preview?: string; media_type: string}>)"
-            :key="i"
-            :src="im.preview"
-            class="thumb"
-            @click="im.preview && openPreview(im.preview)"
-          />
-        </div>
-        <div v-if="m.content" class="content">{{ m.content }}</div>
+        <div class="role" v-if="m.role !== 'tool'">{{ m.role }}</div>
+        <!-- Tool 消息结构化展示 -->
+        <template v-if="m.role === 'tool'">
+          <div class="tool-header" @click="toggleToolExpand(m.id)">
+            <span class="tool-icon" v-if="(m.meta as any)?.kind === 'use'">⚡</span>
+            <span class="tool-icon ok" v-else-if="(m.meta as any)?.kind === 'result' && !(m.meta as any)?.error">✓</span>
+            <span class="tool-icon err" v-else>✗</span>
+            <span class="tool-name">{{ (m.meta as any)?.name || 'tool' }}</span>
+            <span class="tool-summary" v-if="(m.meta as any)?.kind === 'use' && (m.meta as any)?.input">
+              {{ toolArgsSummary((m.meta as any).input) }}
+            </span>
+            <span class="tool-summary" v-else-if="(m.meta as any)?.kind === 'result'">
+              {{ toolResultSummary(m.content) }}
+            </span>
+            <span class="tool-expand">{{ expandedTools.has(m.id) ? '▾' : '▸' }}</span>
+          </div>
+          <div v-if="expandedTools.has(m.id)" class="tool-detail">
+            <div v-if="m.content" class="content">{{ m.content }}</div>
+          </div>
+        </template>
+        <!-- 非 tool 消息 -->
+        <template v-else>
+          <div v-if="m.meta && (m.meta as any).images" class="msg-imgs">
+            <img
+              v-for="(im, i) in ((m.meta as any).images as Array<{preview?: string; media_type: string}>)"
+              :key="i"
+              :src="im.preview"
+              class="thumb"
+              @click="im.preview && openPreview(im.preview)"
+            />
+          </div>
+          <div v-if="m.content" class="content">{{ m.content }}</div>
+        </template>
       </div>
       <div v-if="agentState.running" class="thinking">
         <span class="dot" /><span class="dot" /><span class="dot" />
@@ -655,6 +701,56 @@ header .title {
   padding: 5px 8px;
   border-radius: 4px;
   border-left: 2px solid rgba(94, 234, 212, 0.4);
+}
+.msg.tool-error .tool-header { border-left-color: rgba(248, 113, 113, 0.5); }
+.msg.tool-error .tool-icon { color: #f87171; }
+
+.tool-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  border-left: 2px solid rgba(94, 234, 212, 0.4);
+  cursor: pointer;
+  font-size: 11.5px;
+  transition: background 0.15s;
+}
+.tool-header:hover { background: var(--surface-4); }
+.tool-icon { font-size: 11px; }
+.tool-icon.ok { color: #5eead4; }
+.tool-icon.err { color: #f87171; }
+.tool-name {
+  font-weight: 600;
+  color: #7dd3fc;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+}
+.tool-summary {
+  color: var(--fg-3);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.tool-expand {
+  color: var(--fg-3);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.tool-detail {
+  margin-top: 2px;
+  padding: 4px 8px 4px 18px;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 10.5px;
+  color: var(--fg-3);
+  max-height: 200px;
+  overflow: auto;
+  background: rgba(0,0,0,0.15);
+  border-radius: 0 0 4px 4px;
 }
 
 .thinking {

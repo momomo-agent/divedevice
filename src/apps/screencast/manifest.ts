@@ -93,5 +93,63 @@ export const screencastManifest: AppManifest = {
         }
       },
     },
+    {
+      name: 'input.text',
+      description: '在当前焦点输入文本（支持中文/英文/特殊字符）。先 tap 输入框再调用。',
+      parameters: {
+        type: 'object',
+        properties: { text: { type: 'string', description: '要输入的文本' } },
+        required: ['text'],
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.input.text(String(args.text))
+        return { ok: true, text: args.text }
+      },
+    },
+    {
+      name: 'input.longPress',
+      description: '长按屏幕指定坐标（默认 1000ms）。用于触发长按菜单、拖拽等。',
+      parameters: {
+        type: 'object',
+        properties: {
+          x: { type: 'number' },
+          y: { type: 'number' },
+          durationMs: { type: 'number', description: '长按时长（ms），默认 1000' },
+        },
+        required: ['x', 'y'],
+      },
+      async execute(args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        const dur = Number(args.durationMs) || 1000
+        // long press = swipe from (x,y) to (x,y) with duration
+        await d.input.swipe(Number(args.x), Number(args.y), Number(args.x), Number(args.y), dur)
+        return { ok: true, x: args.x, y: args.y, durationMs: dur }
+      },
+    },
+    {
+      name: 'input.back',
+      description: '按返回键。',
+      parameters: { type: 'object', properties: {} },
+      async execute(_args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.input.key('KEYCODE_BACK')
+        return { ok: true }
+      },
+    },
+    {
+      name: 'input.home',
+      description: '按 Home 键回到主屏幕。',
+      parameters: { type: 'object', properties: {} },
+      async execute(_args, ctx) {
+        const d = ctx.deviceId ? getDevice(ctx.deviceId) : undefined
+        if (!d) throw new Error('未绑定设备')
+        await d.input.key('KEYCODE_HOME')
+        return { ok: true }
+      },
+    },
   ],
 }
